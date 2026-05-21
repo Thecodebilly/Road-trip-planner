@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Road Trip Planner</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header>
+      <h1>Road Trip Planner</h1>
+      <p>Create plans, mark locations, add photos, and discover route ideas.</p>
+    </header>
+
+    <main>
+      <section class="panel">
+        <h2>Create Plan</h2>
+        <form id="planForm">
+          <label>Title <input required id="planTitle" /></label>
+          <label>Description <textarea id="planDescription"></textarea></label>
+          <label>Route Start <input id="routeStart" /></label>
+          <label>Route End <input id="routeEnd" /></label>
+          <button type="submit">Save Plan</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <h2>Search Ideas</h2>
+        <form id="generalSearchForm" class="inline-form">
+          <input id="generalSearchInput" placeholder="Search things to do anywhere" required />
+          <button type="submit">General Search</button>
+        </form>
+        <form id="routeSearchForm" class="inline-form">
+          <input id="routeSearchInput" placeholder="Search ideas along current route" required />
+          <button type="submit">Along Route</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <h2>Add Stop / Marker</h2>
+        <form id="stopForm" enctype="multipart/form-data">
+          <label>Plan <select id="planSelect" required></select></label>
+          <label>Name <input id="stopName" required /></label>
+          <label>Notes <textarea id="stopNotes"></textarea></label>
+          <label>Address <input id="stopAddress" /></label>
+          <label>Latitude <input id="stopLat" type="number" step="any" /></label>
+          <label>Longitude <input id="stopLng" type="number" step="any" /></label>
+          <label>Photo <input id="stopImage" type="file" accept="image/*" /></label>
+          <button type="submit">Save Stop</button>
+        </form>
+      </section>
+
+      <section class="panel">
+        <h2>Email Export</h2>
+        <form id="emailForm" class="inline-form">
+          <select id="emailPlanSelect" required></select>
+          <input type="email" id="emailTo" placeholder="recipient@example.com" required />
+          <button type="submit">Send Plan</button>
+        </form>
+      </section>
+
+      <section class="panel wide">
+        <h2>Map</h2>
+        <div id="map"></div>
+      </section>
+
+      <section class="panel wide">
+        <h2>Saved Stops</h2>
+        <ul id="stopsList"></ul>
+      </section>
+
+      <p id="status"></p>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
