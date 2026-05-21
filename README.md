@@ -31,3 +31,9 @@ A lightweight road trip planning web app that:
 
 The app creates a SQLite database at `data/roadtrip.sqlite` automatically.
 Uploaded images are stored in `uploads/`.
+
+## Railway deployment
+
+- Use the committed lockfile when installing dependencies (`npm ci` is recommended for deploys).
+- Start the app with `npm start`.
+- This project uses `better-sqlite3` (not `sqlite3`) to avoid incompatible prebuilt `sqlite3` binaries that can fail to load on Railway with glibc errors.

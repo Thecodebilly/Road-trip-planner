@@ -21,9 +21,9 @@
   },
   "homepage": "https://github.com/Thecodebilly/Road-trip-planner#readme",
   "dependencies": {
+    "better-sqlite3": "^12.10.0",
     "express": "^5.2.1",
     "multer": "^2.1.1",
-    "nodemailer": "^8.0.7",
-    "better-sqlite3": "^9.2.2"
+    "nodemailer": "^8.0.7"
   }
 }
