@@ -78,7 +78,7 @@ async function refreshPlans() {
   state.plans = await api('/api/plans');
 
   const options = state.plans
-    .map((plan) => `<option value="${plan.id}">${plan.title}</option>`)
+    .map((plan) => `<option value="${plan.id}">${escapeHtml(plan.title)}</option>`)
     .join('');
 
   elements.planSelect.innerHTML = options;
@@ -101,7 +101,7 @@ async function loadPlanDetails(planId) {
           (stop) => `<li>
               <strong>${escapeHtml(stop.name)}</strong>${stop.address ? ` — ${escapeHtml(stop.address)}` : ''}
               ${stop.notes ? `<div>${escapeHtml(stop.notes)}</div>` : ''}
-              ${stop.image_path ? `<img src="${encodeURI(stop.image_path)}" alt="${escapeHtml(stop.name)}" />` : ''}
+              ${stop.image_path ? `<img src="${escapeHtml(stop.image_path)}" alt="${escapeHtml(stop.name)}" />` : ''}
             </li>`,
         )
         .join('')

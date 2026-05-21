@@ -18,7 +18,9 @@ A lightweight road trip planning web app that:
 2. Set environment variables:
    - `GOOGLE_MAPS_API_KEY` (required for map/search features)
    - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` (required for email export)
+   - Optional: `SMTP_SECURE=true|false` to override SMTP TLS mode
    - Optional: `SMTP_FROM`, `PORT`
+   - For security, restrict the Google Maps API key to your allowed domains/referrers in Google Cloud Console.
 3. Start the app:
    ```bash
    npm start
