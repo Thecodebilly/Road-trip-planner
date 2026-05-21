@@ -4,6 +4,9 @@ const state = {
   plans: [],
   routePolyline: null,
 };
+const DEFAULT_MAP_CENTER = { lat: 39.5, lng: -98.35 };
+const DEFAULT_MAP_ZOOM = 4;
+const GENERAL_SEARCH_RADIUS_METERS = 50000;
 
 const elements = {
   status: document.getElementById('status'),
@@ -234,7 +237,7 @@ async function runGeneralSearch(event) {
   const results = await runTextSearch({
     query,
     location: center,
-    radius: 50000,
+    radius: GENERAL_SEARCH_RADIUS_METERS,
   });
 
   results.slice(0, 10).forEach((result) => {
@@ -306,8 +309,8 @@ async function initMap() {
   });
 
   state.map = new google.maps.Map(document.getElementById('map'), {
-    center: { lat: 39.5, lng: -98.35 },
-    zoom: 4,
+    center: DEFAULT_MAP_CENTER,
+    zoom: DEFAULT_MAP_ZOOM,
   });
 
   state.map.addListener('click', (event) => {

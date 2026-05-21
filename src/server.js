@@ -8,6 +8,7 @@ const { createTransport } = require('./mailer');
 
 const app = express();
 const uploadsDir = path.join(__dirname, '..', 'uploads');
+const IMAGE_UPLOAD_ERROR = 'Only image uploads are allowed.';
 
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
@@ -23,7 +24,7 @@ const upload = multer({
   }),
   fileFilter: (_req, file, cb) => {
     if (!file.mimetype.startsWith('image/')) {
-      cb(new Error('Only image uploads are allowed.'));
+      cb(new Error(IMAGE_UPLOAD_ERROR));
       return;
     }
     cb(null, true);
@@ -105,6 +106,12 @@ app.post('/api/plans/:id/stops', upload.single('image'), async (req, res, next) 
     const imagePath = req.file ? `/uploads/${req.file.filename}` : null;
     const latNum = lat !== null && lat !== '' ? Number(lat) : null;
     const lngNum = lng !== null && lng !== '' ? Number(lng) : null;
+    const latIsValid = latNum === null || (Number.isFinite(latNum) && latNum >= -90 && latNum <= 90);
+    const lngIsValid = lngNum === null || (Number.isFinite(lngNum) && lngNum >= -180 && lngNum <= 180);
+    if (!latIsValid || !lngIsValid) {
+      res.status(400).json({ message: 'Latitude must be -90 to 90 and longitude must be -180 to 180.' });
+      return;
+    }
 
     const result = await run(
       `INSERT INTO stops (plan_id, name, notes, lat, lng, address, image_path)
@@ -170,7 +177,7 @@ app.post('/api/plans/:id/email', async (req, res, next) => {
 });
 
 app.use((err, _req, res, _next) => {
-  const isUploadIssue = err instanceof multer.MulterError || err.message === 'Only image uploads are allowed.';
+  const isUploadIssue = err instanceof multer.MulterError || err.message === IMAGE_UPLOAD_ERROR;
   if (isUploadIssue) {
     res.status(400).json({ message: err.message });
     return;
