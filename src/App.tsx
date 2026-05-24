@@ -58,6 +58,7 @@ type MapStopGroup = {
   id: string;
   position: google.maps.LatLngLiteral;
   stops: TripStop[];
+  stopRangeLabel: string;
   dateRangeLabel: string;
   hasWeekend: boolean;
   hasRemoteWork: boolean;
@@ -543,6 +544,16 @@ function formatMapDateRange(stops: TripStop[]) {
   return `${firstMonth} ${firstDay}-${lastMonth} ${lastDay}`;
 }
 
+function formatMapStopRange(stops: TripStop[]) {
+  const orders = stops.map((stop) => stop.order).sort((first, second) => first - second);
+  if (!orders.length) return '';
+
+  const first = orders[0];
+  const last = orders[orders.length - 1];
+
+  return first === last ? String(first) : `${first}-${last}`;
+}
+
 function formatMapGroupHeading(stops: TripStop[]) {
   const labels = Array.from(new Set(stops.map((stop) => stop.label)));
   if (labels.length === 1) return labels[0];
@@ -700,6 +711,7 @@ function groupMapStops(stops: TripStop[]): MapStopGroup[] {
       id: `${key}:${sortedStops.map((stop) => stop.id).join('-')}`,
       position: { lat: firstStop.lat, lng: firstStop.lng },
       stops: sortedStops,
+      stopRangeLabel: formatMapStopRange(sortedStops),
       dateRangeLabel: formatMapDateRange(sortedStops),
       hasWeekend: sortedStops.some((stop) => isWeekendDate(stop.date)),
       hasRemoteWork: sortedStops.some((stop) => stop.remoteWork),
@@ -2027,7 +2039,7 @@ function MapCanvas({
 
       {mapStopGroups.map((group) => {
         const selectedInGroup = group.stops.some((stop) => stop.id === selectedStopId);
-        const markerLabel = group.stops.length > 1 ? group.dateRangeLabel : String(group.stops[0].order);
+        const markerLabel = group.stopRangeLabel || String(group.stops[0].order);
         const className = [
           'map-stop-marker',
           group.stops.length > 1 ? 'grouped' : '',
@@ -2058,12 +2070,12 @@ function MapCanvas({
               }}
               title={
                 group.stops.length > 1
-                  ? `${group.dateRangeLabel}: ${heading}`
+                  ? `Stops ${group.stopRangeLabel}: ${heading} (${group.dateRangeLabel})`
                   : `${heading}: ${group.dateRangeLabel}`
               }
               aria-label={
                 group.stops.length > 1
-                  ? `${group.dateRangeLabel}, ${group.stops.length} stops at ${heading}`
+                  ? `Stops ${group.stopRangeLabel}, ${group.dateRangeLabel}, ${group.stops.length} stops at ${heading}`
                   : `Stop ${group.stops[0].order}, ${heading}`
               }
             >
@@ -2079,7 +2091,11 @@ function MapCanvas({
           onCloseClick={() => onSelectStop(null)}
         >
           <div className="info-window">
-            <p>{selectedMapGroup.dateRangeLabel}</p>
+            <p>
+              {selectedMapGroup.stops.length > 1
+                ? `Stops ${selectedMapGroup.stopRangeLabel} | ${selectedMapGroup.dateRangeLabel}`
+                : selectedMapGroup.dateRangeLabel}
+            </p>
             <h2>{formatMapGroupHeading(selectedMapGroup.stops)}</h2>
             {selectedMapGroup.stops.length > 1 ? (
               <div className="info-window-list" aria-label="Stops at this point">
