@@ -1849,7 +1849,8 @@ function MapCanvas({
             label={{
               text: String(stop.order),
               color: '#ffffff',
-              fontWeight: isWeekend ? '900' : '700',
+              fontSize: '12px',
+              fontWeight: '700',
             }}
             icon={{
               path: google.maps.SymbolPath.CIRCLE,
