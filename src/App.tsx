@@ -19,6 +19,7 @@ import {
   Import,
   LocateFixed,
   MapPin,
+  Maximize2,
   Plus,
   Route,
   Save,
@@ -114,7 +115,9 @@ type MapCanvasProps = {
   stops: TripStop[];
   selectedStopId: string | null;
   fitSignal: number;
+  isPlacingPin: boolean;
   onSelectStop: (stopId: string | null) => void;
+  onPlacePin: (position: google.maps.LatLngLiteral) => void;
   onRouteDistanceChange: (miles: number | null) => void;
   onDriveEstimatesChange: (estimates: DriveEstimate[] | null) => void;
 };
@@ -726,6 +729,9 @@ function App() {
     () => activeTrip.stops[0]?.id || null,
   );
   const [fitSignal, setFitSignal] = useState(0);
+  const [isPlacingPin, setIsPlacingPin] = useState(false);
+  const [locationMessage, setLocationMessage] = useState('');
+  const [isLocating, setIsLocating] = useState(false);
   const [saveMessage, setSaveMessage] = useState('');
   const [routeAssistantPrompt, setRouteAssistantPrompt] = useState('');
   const [routeAssistantMessage, setRouteAssistantMessage] = useState('');
@@ -897,6 +903,73 @@ function App() {
     if (!Number.isFinite(nextValue) || nextValue <= 0) return;
 
     setFuelMpg(nextValue);
+  };
+
+  const insertStopAtCoordinates = (
+    position: google.maps.LatLngLiteral,
+    label = 'Dropped pin',
+    notes = 'Added from map pin.',
+  ) => {
+    const anchorIndex = selectedStop
+      ? stops.findIndex((stop) => stop.id === selectedStop.id)
+      : stops.length - 1;
+    const order = Math.max(anchorIndex + 2, 1);
+    const newStop: TripStop = {
+      id: makeId('stop'),
+      order,
+      date: selectedStop?.date || '',
+      label,
+      lat: Number(position.lat.toFixed(6)),
+      lng: Number(position.lng.toFixed(6)),
+      notes,
+      remoteWork: false,
+    };
+
+    touchTrip((trip) => {
+      const before = trip.stops.filter((stop) => stop.order < order);
+      const after = trip.stops.filter((stop) => stop.order >= order);
+      return { ...trip, stops: resequenceStops([...before, newStop, ...after]) };
+    });
+    setSelectedStopId(newStop.id);
+    setIsPlacingPin(false);
+    setLocationMessage(`Added ${label}`);
+    setFitSignal((value) => value + 1);
+  };
+
+  const placePin = (position: google.maps.LatLngLiteral) => {
+    insertStopAtCoordinates(position);
+  };
+
+  const useCurrentLocation = () => {
+    if (!navigator.geolocation) {
+      setLocationMessage('Location is not available in this browser.');
+      return;
+    }
+
+    setIsLocating(true);
+    setLocationMessage('Getting current location...');
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        insertStopAtCoordinates(
+          {
+            lat: position.coords.latitude,
+            lng: position.coords.longitude,
+          },
+          'Current location',
+          'Added from browser location.',
+        );
+        setIsLocating(false);
+      },
+      () => {
+        setLocationMessage('Location permission was blocked or unavailable.');
+        setIsLocating(false);
+      },
+      {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 30000,
+      },
+    );
   };
 
   const addStop = () => {
@@ -1341,13 +1414,38 @@ function App() {
               </button>
               <button
                 type="button"
+                className={isPlacingPin ? 'icon-button active' : 'icon-button'}
+                onClick={() => {
+                  setIsPlacingPin((value) => !value);
+                  setLocationMessage(isPlacingPin ? '' : 'Click the map to place a pin.');
+                }}
+                title="Place pin on map"
+                aria-label="Place pin on map"
+                aria-pressed={isPlacingPin}
+              >
+                <MapPin size={18} />
+              </button>
+              <button
+                type="button"
                 className="icon-button"
-                onClick={() => setFitSignal((value) => value + 1)}
-                title="Fit route"
+                onClick={useCurrentLocation}
+                title="Use current location"
+                aria-label="Use current location"
+                disabled={isLocating}
               >
                 <LocateFixed size={18} />
               </button>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => setFitSignal((value) => value + 1)}
+                title="Fit route"
+                aria-label="Fit route"
+              >
+                <Maximize2 size={18} />
+              </button>
             </div>
+            {locationMessage && <p className="location-message">{locationMessage}</p>}
           </section>
 
           <section className="panel-section">
@@ -1466,7 +1564,9 @@ function App() {
               stops={stops}
               selectedStopId={selectedStopId}
               fitSignal={fitSignal}
+              isPlacingPin={isPlacingPin}
               onSelectStop={setSelectedStopId}
+              onPlacePin={placePin}
               onRouteDistanceChange={setDrivingMiles}
               onDriveEstimatesChange={setRoadDriveEstimates}
             />
@@ -1698,7 +1798,9 @@ function MapCanvas({
   stops,
   selectedStopId,
   fitSignal,
+  isPlacingPin,
   onSelectStop,
+  onPlacePin,
   onRouteDistanceChange,
   onDriveEstimatesChange,
 }: MapCanvasProps) {
@@ -1852,6 +1954,14 @@ function MapCanvas({
       mapContainerStyle={mapContainerStyle}
       center={usCenter}
       zoom={4}
+      onClick={(event) => {
+        if (!isPlacingPin || !event.latLng) return;
+
+        onPlacePin({
+          lat: event.latLng.lat(),
+          lng: event.latLng.lng(),
+        });
+      }}
       onLoad={(map) => {
         mapRef.current = map;
         setMapInstance(map);
@@ -1870,6 +1980,7 @@ function MapCanvas({
         clickableIcons: false,
         gestureHandling: 'cooperative',
         styles: mapStyles,
+        draggableCursor: isPlacingPin ? 'crosshair' : undefined,
       }}
     >
       {routeStatus === 'fallback' && path.length > 1 && (

@@ -337,6 +337,13 @@ textarea:focus {
   border-color: transparent;
 }
 
+.icon-button.active {
+  background: #ecf7f4;
+  border-color: #0f766e;
+  color: #115e59;
+  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
+}
+
 .icon-button.danger {
   color: #b42318;
   border-color: #f2c8c3;
@@ -362,6 +369,13 @@ textarea:focus {
 .icon-button:disabled {
   cursor: not-allowed;
   opacity: 0.42;
+}
+
+.location-message {
+  margin: -0.1rem 0 0;
+  color: #47615d;
+  font-size: 0.82rem;
+  font-weight: 700;
 }
 
 .panel-section {
