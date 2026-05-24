@@ -3,7 +3,8 @@ import type { ChangeEvent, FormEvent } from 'react';
 import {
   GoogleMap,
   InfoWindowF,
-  MarkerF,
+  OVERLAY_MOUSE_TARGET,
+  OverlayViewF,
   PolylineF,
   useLoadScript,
 } from '@react-google-maps/api';
@@ -53,10 +54,13 @@ type DriveEstimate = {
   source: 'road' | 'estimated';
 };
 
-type MapStop = TripStop & {
-  markerLat: number;
-  markerLng: number;
-  markerStackSize: number;
+type MapStopGroup = {
+  id: string;
+  position: google.maps.LatLngLiteral;
+  stops: TripStop[];
+  dateRangeLabel: string;
+  hasWeekend: boolean;
+  hasRemoteWork: boolean;
 };
 
 type Trip = {
@@ -123,6 +127,7 @@ type MapCanvasProps = {
 };
 
 const mapContainerStyle = { width: '100%', height: '100%' };
+const centerOverlay = (width: number, height: number) => ({ x: -(width / 2), y: -(height / 2) });
 const usCenter = { lat: 39.8283, lng: -98.5795 };
 const savedTripsKey = 'road-trip-planner.savedTrips.v1';
 const activeTripKey = 'road-trip-planner.activeTrip.v1';
@@ -507,6 +512,44 @@ function formatDate(date: string) {
   }).format(parsed);
 }
 
+function formatMapDateRange(stops: TripStop[]) {
+  const uniqueDates = Array.from(
+    new Set(
+      stops
+        .map((stop) => stop.date)
+        .filter((date) => {
+          const parsed = new Date(`${date}T00:00:00`);
+          return date && !Number.isNaN(parsed.getTime());
+        }),
+    ),
+  ).sort();
+
+  if (!uniqueDates.length) return stops.length > 1 ? `${stops.length} stops` : 'Unscheduled';
+
+  const first = new Date(`${uniqueDates[0]}T00:00:00`);
+  const last = new Date(`${uniqueDates[uniqueDates.length - 1]}T00:00:00`);
+
+  if (uniqueDates.length === 1) return formatDate(uniqueDates[0]);
+
+  const firstMonth = new Intl.DateTimeFormat('en', { month: 'short' }).format(first);
+  const lastMonth = new Intl.DateTimeFormat('en', { month: 'short' }).format(last);
+  const firstDay = first.getDate();
+  const lastDay = last.getDate();
+
+  if (first.getFullYear() === last.getFullYear() && first.getMonth() === last.getMonth()) {
+    return `${firstMonth} ${firstDay}-${lastDay}`;
+  }
+
+  return `${firstMonth} ${firstDay}-${lastMonth} ${lastDay}`;
+}
+
+function formatMapGroupHeading(stops: TripStop[]) {
+  const labels = Array.from(new Set(stops.map((stop) => stop.label)));
+  if (labels.length === 1) return labels[0];
+
+  return `${labels[0]} + ${labels.length - 1} more`;
+}
+
 function isWeekendDate(date: string) {
   if (!date) return false;
 
@@ -642,7 +685,7 @@ function formatDriveSummary(estimate: DriveEstimate, gasPrice: number, fuelMpg: 
   )} | ${formatGasCost(estimate.distanceMiles, gasPrice, fuelMpg)} gas`;
 }
 
-function spreadOverlappingStops(stops: TripStop[]): MapStop[] {
+function groupMapStops(stops: TripStop[]): MapStopGroup[] {
   const groups = new Map<string, TripStop[]>();
 
   stops.forEach((stop) => {
@@ -650,28 +693,16 @@ function spreadOverlappingStops(stops: TripStop[]): MapStop[] {
     groups.set(key, [...(groups.get(key) || []), stop]);
   });
 
-  return stops.map((stop) => {
-    const key = `${stop.lat.toFixed(5)},${stop.lng.toFixed(5)}`;
-    const group = groups.get(key) || [stop];
-    const stackIndex = group.findIndex((groupedStop) => groupedStop.id === stop.id);
-
-    if (group.length === 1 || stackIndex < 0) {
-      return {
-        ...stop,
-        markerLat: stop.lat,
-        markerLng: stop.lng,
-        markerStackSize: group.length,
-      };
-    }
-
-    const angle = (Math.PI * 2 * stackIndex) / group.length - Math.PI / 2;
-    const radius = 0.018 + Math.min(group.length, 5) * 0.003;
-
+  return Array.from(groups.entries()).map(([key, groupedStops]) => {
+    const sortedStops = [...groupedStops].sort((first, second) => first.order - second.order);
+    const firstStop = sortedStops[0];
     return {
-      ...stop,
-      markerLat: stop.lat + Math.sin(angle) * radius,
-      markerLng: stop.lng + Math.cos(angle) * radius,
-      markerStackSize: group.length,
+      id: `${key}:${sortedStops.map((stop) => stop.id).join('-')}`,
+      position: { lat: firstStop.lat, lng: firstStop.lng },
+      stops: sortedStops,
+      dateRangeLabel: formatMapDateRange(sortedStops),
+      hasWeekend: sortedStops.some((stop) => isWeekendDate(stop.date)),
+      hasRemoteWork: sortedStops.some((stop) => stop.remoteWork),
     };
   });
 }
@@ -1815,10 +1846,10 @@ function MapCanvas({
     () => stops.find((stop) => stop.id === selectedStopId) || null,
     [selectedStopId, stops],
   );
-  const mapStops = useMemo(() => spreadOverlappingStops(stops), [stops]);
-  const selectedMapStop = useMemo(
-    () => mapStops.find((stop) => stop.id === selectedStopId) || null,
-    [mapStops, selectedStopId],
+  const mapStopGroups = useMemo(() => groupMapStops(stops), [stops]);
+  const selectedMapGroup = useMemo(
+    () => mapStopGroups.find((group) => group.stops.some((stop) => stop.id === selectedStopId)) || null,
+    [mapStopGroups, selectedStopId],
   );
   const path = useMemo(() => stops.map((stop) => ({ lat: stop.lat, lng: stop.lng })), [stops]);
   const directionsKey = useMemo(
@@ -1994,48 +2025,87 @@ function MapCanvas({
         />
       )}
 
-      {mapStops.map((stop) => {
-        const isWeekend = isWeekendDate(stop.date);
+      {mapStopGroups.map((group) => {
+        const selectedInGroup = group.stops.some((stop) => stop.id === selectedStopId);
+        const markerLabel = group.stops.length > 1 ? group.dateRangeLabel : String(group.stops[0].order);
+        const className = [
+          'map-stop-marker',
+          group.stops.length > 1 ? 'grouped' : '',
+          group.hasRemoteWork ? 'remote' : '',
+          group.hasWeekend ? 'weekend' : '',
+          selectedInGroup ? 'selected' : '',
+        ]
+          .filter(Boolean)
+          .join(' ');
+        const heading = formatMapGroupHeading(group.stops);
+        const selectedGroupStop = group.stops.find((stop) => stop.id === selectedStopId);
 
         return (
-          <MarkerF
-            key={stop.id}
-            position={{ lat: stop.markerLat, lng: stop.markerLng }}
-            onClick={() => onSelectStop(stop.id)}
-            title={`${stop.label}${isWeekend ? ' (weekend)' : ''}${
-              stop.markerStackSize > 1 ? ' (offset from overlapping stop)' : ''
-            }`}
-            label={{
-              text: String(stop.order),
-              color: '#ffffff',
-              fontSize: '12px',
-              fontWeight: '700',
-            }}
-            icon={{
-              path: google.maps.SymbolPath.CIRCLE,
-              fillColor: stop.remoteWork ? '#9f2d55' : '#0f766e',
-              fillOpacity: 1,
-              strokeColor: isWeekend ? '#17202a' : '#ffffff',
-              strokeWeight: isWeekend ? 4 : 2,
-              scale: stop.id === selectedStopId ? (isWeekend ? 15 : 13) : isWeekend ? 12 : 10,
-            }}
-          />
+          <OverlayViewF
+            key={group.id}
+            position={group.position}
+            mapPaneName={OVERLAY_MOUSE_TARGET}
+            getPixelPositionOffset={centerOverlay}
+            zIndex={selectedInGroup ? 30 : group.hasWeekend ? 20 : 10}
+          >
+            <button
+              type="button"
+              className={className}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onSelectStop(selectedGroupStop?.id || group.stops[0].id);
+              }}
+              title={
+                group.stops.length > 1
+                  ? `${group.dateRangeLabel}: ${heading}`
+                  : `${heading}: ${group.dateRangeLabel}`
+              }
+              aria-label={
+                group.stops.length > 1
+                  ? `${group.dateRangeLabel}, ${group.stops.length} stops at ${heading}`
+                  : `Stop ${group.stops[0].order}, ${heading}`
+              }
+            >
+              <span>{markerLabel}</span>
+            </button>
+          </OverlayViewF>
         );
       })}
 
-      {selectedStop && (
+      {selectedStop && selectedMapGroup && (
         <InfoWindowF
-          position={{
-            lat: selectedMapStop?.markerLat || selectedStop.lat,
-            lng: selectedMapStop?.markerLng || selectedStop.lng,
-          }}
+          position={selectedMapGroup.position}
           onCloseClick={() => onSelectStop(null)}
         >
           <div className="info-window">
-            <p>{formatDate(selectedStop.date)}</p>
-            <h2>{selectedStop.label}</h2>
-            <p>{selectedStop.notes || 'No notes yet.'}</p>
-            {selectedStop.remoteWork && <span className="remote-badge">Remote-work stop</span>}
+            <p>{selectedMapGroup.dateRangeLabel}</p>
+            <h2>{formatMapGroupHeading(selectedMapGroup.stops)}</h2>
+            {selectedMapGroup.stops.length > 1 ? (
+              <div className="info-window-list" aria-label="Stops at this point">
+                {selectedMapGroup.stops.map((stop) => (
+                  <button
+                    type="button"
+                    key={stop.id}
+                    className={stop.id === selectedStop.id ? 'info-window-stop active' : 'info-window-stop'}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      onSelectStop(stop.id);
+                    }}
+                  >
+                    <span>{formatDate(stop.date)}</span>
+                    <strong>{stop.label}</strong>
+                    <small>{stop.notes || 'No notes yet.'}</small>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <>
+                <p>{selectedStop.notes || 'No notes yet.'}</p>
+                {selectedStop.remoteWork && <span className="remote-badge">Remote-work stop</span>}
+              </>
+            )}
           </div>
         </InfoWindowF>
       )}

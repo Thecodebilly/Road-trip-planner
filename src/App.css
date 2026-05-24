@@ -724,6 +724,53 @@ textarea:focus {
   color: #9f2d55;
 }
 
+.map-stop-marker {
+  min-width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 0.4rem;
+  border: 2px solid #ffffff;
+  border-radius: 999px;
+  background: #0f766e;
+  box-shadow: 0 8px 18px rgba(23, 32, 42, 0.24);
+  color: #ffffff;
+  cursor: pointer;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0;
+  line-height: 1;
+  pointer-events: auto;
+  white-space: nowrap;
+  transform-origin: center;
+}
+
+.map-stop-marker.grouped {
+  min-width: 58px;
+  height: 30px;
+  padding: 0 0.58rem;
+  font-size: 0.68rem;
+}
+
+.map-stop-marker.remote {
+  background: #9f2d55;
+}
+
+.map-stop-marker.weekend {
+  border-color: #17202a;
+  box-shadow:
+    0 0 0 2px rgba(255, 255, 255, 0.82),
+    0 8px 18px rgba(23, 32, 42, 0.24);
+}
+
+.map-stop-marker.selected {
+  transform: scale(1.08);
+  box-shadow:
+    0 0 0 3px rgba(15, 118, 110, 0.22),
+    0 10px 22px rgba(23, 32, 42, 0.28);
+}
+
 .route-status {
   position: absolute;
   left: 50%;
@@ -858,6 +905,48 @@ textarea:focus {
 .info-window p {
   margin: 0;
   color: #52605d;
+}
+
+.info-window-list {
+  display: grid;
+  gap: 0.4rem;
+  margin-top: 0.55rem;
+}
+
+.info-window-stop {
+  width: 100%;
+  display: grid;
+  gap: 0.14rem;
+  padding: 0.45rem 0.5rem;
+  border: 1px solid #dfe5ec;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #17202a;
+  cursor: pointer;
+  text-align: left;
+}
+
+.info-window-stop:hover,
+.info-window-stop.active {
+  border-color: #0f766e;
+  background: #ecf7f4;
+}
+
+.info-window-stop span {
+  color: #52605d;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.info-window-stop strong {
+  font-size: 0.84rem;
+  line-height: 1.2;
+}
+
+.info-window-stop small {
+  color: #52605d;
+  font-size: 0.74rem;
+  line-height: 1.25;
 }
 
 .remote-badge {
