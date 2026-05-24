@@ -13,6 +13,7 @@ import {
   ChevronUp,
   Copy,
   Download,
+  Eye,
   FilePlus2,
   FolderOpen,
   LocateFixed,
@@ -22,6 +23,7 @@ import {
   Save,
   Trash2,
   Wifi,
+  X,
 } from 'lucide-react';
 import tripStops from './tripStops.json';
 
@@ -362,7 +364,10 @@ function sanitizeFileName(value: string) {
 }
 
 function downloadTripExport(trip: Trip) {
-  const exportedTrip = createTripExport(trip);
+  downloadExportedTrip(createTripExport(trip));
+}
+
+function downloadExportedTrip(exportedTrip: ExportedTrip) {
   const blob = new Blob([`${JSON.stringify(exportedTrip, null, 2)}\n`], {
     type: 'application/json',
   });
@@ -375,6 +380,23 @@ function downloadTripExport(trip: Trip) {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+}
+
+async function copyText(value: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(value);
+    return;
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = value;
+  textarea.setAttribute('readonly', '');
+  textarea.style.position = 'fixed';
+  textarea.style.top = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand('copy');
+  textarea.remove();
 }
 
 function formatDate(date: string) {
@@ -478,6 +500,8 @@ function App() {
   const [saveBackend, setSaveBackend] = useState<SaveBackend>('checking');
   const [isSaving, setIsSaving] = useState(false);
   const [drivingMiles, setDrivingMiles] = useState<number | null>(null);
+  const [previewExport, setPreviewExport] = useState<ExportedTrip | null>(null);
+  const [previewCopied, setPreviewCopied] = useState(false);
 
   const stops = useMemo(() => resequenceStops(activeTrip.stops), [activeTrip.stops]);
   const selectedStop = useMemo(
@@ -493,6 +517,10 @@ function App() {
   }, [stops]);
   const saveBackendLabel =
     saveBackend === 'database' ? 'DB' : saveBackend === 'local' ? 'Local' : 'Sync';
+  const previewJson = useMemo(
+    () => (previewExport ? `${JSON.stringify(previewExport, null, 2)}\n` : ''),
+    [previewExport],
+  );
 
   useEffect(() => {
     let canceled = false;
@@ -535,6 +563,19 @@ function App() {
   useEffect(() => {
     writeStorage(activeTripKey, activeTrip);
   }, [activeTrip]);
+
+  useEffect(() => {
+    if (!previewExport) return undefined;
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setPreviewExport(null);
+      }
+    };
+
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [previewExport]);
 
   useEffect(() => {
     if (!stops.length) {
@@ -642,6 +683,29 @@ function App() {
     touchTrip((trip) => ({ ...trip, stops: resequenceStops(nextStops) }));
   };
 
+  const getActiveTripForExport = () => normalizeTrip({ ...activeTrip, stops }) || activeTrip;
+
+  const previewTripExport = (trip: Trip) => {
+    const normalizedTrip = normalizeTrip(trip) || trip;
+    setPreviewExport(createTripExport(normalizedTrip));
+    setPreviewCopied(false);
+  };
+
+  const previewActiveTrip = () => {
+    previewTripExport(getActiveTripForExport());
+  };
+
+  const copyPreviewJson = async () => {
+    if (!previewJson) return;
+
+    try {
+      await copyText(previewJson);
+      setPreviewCopied(true);
+    } catch {
+      setPreviewCopied(false);
+    }
+  };
+
   const saveTrip = async () => {
     const now = new Date().toISOString();
     const tripToSave = normalizeTrip({ ...activeTrip, stops, updatedAt: now }) || activeTrip;
@@ -670,7 +734,7 @@ function App() {
   };
 
   const exportActiveTrip = () => {
-    const tripToExport = normalizeTrip({ ...activeTrip, stops }) || activeTrip;
+    const tripToExport = getActiveTripForExport();
     downloadTripExport(tripToExport);
     setSaveMessage('Exported JSON');
   };
@@ -734,6 +798,15 @@ function App() {
           {saveMessage && <span className="save-status">{saveMessage}</span>}
           <button type="button" className="icon-button" onClick={startNewTrip} title="New trip">
             <FilePlus2 size={18} />
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={previewActiveTrip}
+            title="Preview active trip JSON"
+            aria-label="Preview active trip JSON"
+          >
+            <Eye size={18} />
           </button>
           <button
             type="button"
@@ -851,6 +924,15 @@ function App() {
                       </span>
                     </button>
                     <span className="saved-actions">
+                      <button
+                        type="button"
+                        className="icon-button ghost"
+                        onClick={() => previewTripExport(trip)}
+                        title="Preview saved trip JSON"
+                        aria-label={`Preview ${trip.name} JSON`}
+                      >
+                        <Eye size={16} />
+                      </button>
                       <button
                         type="button"
                         className="icon-button ghost"
@@ -1018,6 +1100,51 @@ function App() {
           )}
         </aside>
       </main>
+
+      {previewExport && (
+        <div className="json-modal-backdrop" role="presentation" onClick={() => setPreviewExport(null)}>
+          <section
+            className="json-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="json-preview-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="json-modal-header">
+              <span>
+                <h2 id="json-preview-title">JSON Preview</h2>
+                <p>{previewExport.trip.name}</p>
+              </span>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => setPreviewExport(null)}
+                title="Close preview"
+                aria-label="Close preview"
+              >
+                <X size={18} />
+              </button>
+            </header>
+            <pre className="json-preview" aria-label={`${previewExport.trip.name} JSON export`}>
+              <code>{previewJson}</code>
+            </pre>
+            <footer className="json-modal-actions">
+              <button type="button" className="secondary-button" onClick={copyPreviewJson}>
+                <Copy size={17} />
+                <span>{previewCopied ? 'Copied' : 'Copy JSON'}</span>
+              </button>
+              <button
+                type="button"
+                className="primary-button"
+                onClick={() => downloadExportedTrip(previewExport)}
+              >
+                <Download size={17} />
+                <span>Download</span>
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
     </div>
   );
 }
