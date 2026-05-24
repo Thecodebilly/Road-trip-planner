@@ -1,6 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent } from 'react';
-import { GoogleMap, InfoWindowF, MarkerF, PolylineF, useLoadScript } from '@react-google-maps/api';
+import {
+  GoogleMap,
+  InfoWindowF,
+  MarkerF,
+  PolylineF,
+  useLoadScript,
+} from '@react-google-maps/api';
 import {
   CalendarDays,
   ChevronDown,
@@ -48,12 +54,37 @@ type ExportedTrip = {
   trip: Trip;
 };
 
+type RoadRoute = {
+  distanceMeters?: number;
+  warnings?: string[];
+  createPolylines: (options?: {
+    polylineOptions?: google.maps.PolylineOptions | ((options: google.maps.PolylineOptions) => google.maps.PolylineOptions);
+  }) => google.maps.Polyline[];
+};
+
+type RoadRoutesLibrary = google.maps.RoutesLibrary & {
+  Route: {
+    computeRoutes: (request: {
+      origin: google.maps.LatLngLiteral;
+      destination: google.maps.LatLngLiteral;
+      intermediates?: Array<{
+        location: google.maps.LatLngLiteral;
+        vehicleStopover?: boolean;
+      }>;
+      travelMode: 'DRIVING';
+      routingPreference: 'TRAFFIC_UNAWARE';
+      fields: string[];
+    }) => Promise<{ routes?: RoadRoute[] }>;
+  };
+};
+
 type MapCanvasProps = {
   apiKey: string;
   stops: TripStop[];
   selectedStopId: string | null;
   fitSignal: number;
   onSelectStop: (stopId: string | null) => void;
+  onRouteDistanceChange: (miles: number | null) => void;
 };
 
 const mapContainerStyle = { width: '100%', height: '100%' };
@@ -61,6 +92,7 @@ const usCenter = { lat: 39.8283, lng: -98.5795 };
 const savedTripsKey = 'road-trip-planner.savedTrips.v1';
 const activeTripKey = 'road-trip-planner.activeTrip.v1';
 const defaultTripId = 'default-2026-usa-itinerary';
+const maxStopsPerDirectionsRequest = 25;
 const exportFormatExample = JSON.stringify(
   {
     format: 'road-trip-planner.saved-trip.v1',
@@ -307,6 +339,50 @@ function calculateMiles(stops: TripStop[]) {
   return Math.round(miles);
 }
 
+function splitStopsForDirections(stops: TripStop[]) {
+  const chunks: TripStop[][] = [];
+  let startIndex = 0;
+
+  while (startIndex < stops.length - 1) {
+    const endIndex = Math.min(startIndex + maxStopsPerDirectionsRequest - 1, stops.length - 1);
+    chunks.push(stops.slice(startIndex, endIndex + 1));
+    startIndex = endIndex;
+  }
+
+  return chunks;
+}
+
+async function requestRoadRoute(routeLibrary: RoadRoutesLibrary, stops: TripStop[]) {
+  const [origin, ...rest] = stops;
+  const destination = rest[rest.length - 1];
+  const intermediates = rest.slice(0, -1).map((stop) => ({
+    location: { lat: stop.lat, lng: stop.lng },
+    vehicleStopover: true,
+  }));
+
+  const response = await routeLibrary.Route.computeRoutes({
+    origin: { lat: origin.lat, lng: origin.lng },
+    destination: { lat: destination.lat, lng: destination.lng },
+    intermediates,
+    travelMode: 'DRIVING',
+    routingPreference: 'TRAFFIC_UNAWARE',
+    fields: ['path', 'distanceMeters', 'warnings'],
+  });
+
+  const route = response.routes?.[0];
+  if (!route) {
+    throw new Error('NO_ROUTE');
+  }
+
+  return route;
+}
+
+function calculateRoadRouteMiles(routes: RoadRoute[]) {
+  const meters = routes.reduce((total, route) => total + (route.distanceMeters || 0), 0);
+
+  return meters > 0 ? Math.round(meters / 1609.344) : null;
+}
+
 function App() {
   const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
   const [savedTrips, setSavedTrips] = useState<Trip[]>(readSavedTrips);
@@ -316,6 +392,7 @@ function App() {
   );
   const [fitSignal, setFitSignal] = useState(0);
   const [saveMessage, setSaveMessage] = useState('');
+  const [drivingMiles, setDrivingMiles] = useState<number | null>(null);
 
   const stops = useMemo(() => resequenceStops(activeTrip.stops), [activeTrip.stops]);
   const selectedStop = useMemo(
@@ -323,6 +400,7 @@ function App() {
     [selectedStopId, stops],
   );
   const routeMiles = useMemo(() => calculateMiles(stops), [stops]);
+  const displayMiles = drivingMiles ?? routeMiles;
   const remoteStops = useMemo(() => stops.filter((stop) => stop.remoteWork).length, [stops]);
   const dateRange = useMemo(() => {
     if (!stops.length) return 'No stops';
@@ -546,8 +624,8 @@ function App() {
                 <span>Stops</span>
               </div>
               <div>
-                <strong>{routeMiles.toLocaleString()}</strong>
-                <span>Miles</span>
+                <strong>{displayMiles.toLocaleString()}</strong>
+                <span>{drivingMiles === null ? 'Est. miles' : 'Drive mi'}</span>
               </div>
               <div>
                 <strong>{remoteStops}</strong>
@@ -669,6 +747,7 @@ function App() {
               selectedStopId={selectedStopId}
               fitSignal={fitSignal}
               onSelectStop={setSelectedStopId}
+              onRouteDistanceChange={setDrivingMiles}
             />
           ) : (
             <div className="map-state">
@@ -792,13 +871,29 @@ function App() {
   );
 }
 
-function MapCanvas({ apiKey, stops, selectedStopId, fitSignal, onSelectStop }: MapCanvasProps) {
+function MapCanvas({
+  apiKey,
+  stops,
+  selectedStopId,
+  fitSignal,
+  onSelectStop,
+  onRouteDistanceChange,
+}: MapCanvasProps) {
   const mapRef = useRef<google.maps.Map | null>(null);
+  const routePolylinesRef = useRef<google.maps.Polyline[]>([]);
+  const [mapInstance, setMapInstance] = useState<google.maps.Map | null>(null);
+  const [routeWarnings, setRouteWarnings] = useState<string[]>([]);
+  const [routeStatus, setRouteStatus] = useState<'idle' | 'loading' | 'ready' | 'fallback'>('idle');
+  const [routeError, setRouteError] = useState('');
   const selectedStop = useMemo(
     () => stops.find((stop) => stop.id === selectedStopId) || null,
     [selectedStopId, stops],
   );
   const path = useMemo(() => stops.map((stop) => ({ lat: stop.lat, lng: stop.lng })), [stops]);
+  const directionsKey = useMemo(
+    () => stops.map((stop) => `${stop.id}:${stop.order}:${stop.lat.toFixed(5)},${stop.lng.toFixed(5)}`).join('|'),
+    [stops],
+  );
 
   const { isLoaded, loadError } = useLoadScript({
     googleMapsApiKey: apiKey,
@@ -823,6 +918,78 @@ function MapCanvas({ apiKey, stops, selectedStopId, fitSignal, onSelectStop }: M
     fitAllStops(mapRef.current);
   }, [fitSignal]);
 
+  useEffect(() => {
+    const clearRoutePolylines = () => {
+      routePolylinesRef.current.forEach((polyline) => polyline.setMap(null));
+      routePolylinesRef.current = [];
+    };
+
+    if (!isLoaded || !mapInstance || stops.length < 2) {
+      clearRoutePolylines();
+      setRouteStatus('idle');
+      setRouteError('');
+      setRouteWarnings([]);
+      onRouteDistanceChange(null);
+      return undefined;
+    }
+
+    let canceled = false;
+    clearRoutePolylines();
+    setRouteStatus('loading');
+    setRouteError('');
+    setRouteWarnings([]);
+    onRouteDistanceChange(null);
+
+    const timeoutId = window.setTimeout(() => {
+      const chunks = splitStopsForDirections(stops);
+
+      google.maps
+        .importLibrary('routes')
+        .then((library) => {
+          const routeLibrary = library as RoadRoutesLibrary;
+          if (!('Route' in routeLibrary)) {
+            throw new Error('ROUTES_LIBRARY_UNAVAILABLE');
+          }
+
+          return Promise.all(chunks.map((chunk) => requestRoadRoute(routeLibrary, chunk)));
+        })
+        .then((routes) => {
+          if (canceled) return;
+
+          const polylines = routes.flatMap((route) =>
+            route.createPolylines({
+              polylineOptions: {
+                strokeColor: '#0f766e',
+                strokeOpacity: 0.95,
+                strokeWeight: 5,
+              },
+            }),
+          );
+          polylines.forEach((polyline) => polyline.setMap(mapInstance));
+          routePolylinesRef.current = polylines;
+          setRouteStatus('ready');
+          setRouteError('');
+          setRouteWarnings(routes.flatMap((route) => route.warnings || []));
+          onRouteDistanceChange(calculateRoadRouteMiles(routes));
+        })
+        .catch((error: Error) => {
+          if (canceled) return;
+
+          clearRoutePolylines();
+          setRouteStatus('fallback');
+          setRouteError(error.message);
+          setRouteWarnings([]);
+          onRouteDistanceChange(null);
+        });
+    }, 300);
+
+    return () => {
+      canceled = true;
+      window.clearTimeout(timeoutId);
+      clearRoutePolylines();
+    };
+  }, [directionsKey, isLoaded, mapInstance, onRouteDistanceChange, stops]);
+
   if (loadError) {
     return (
       <div className="map-state error">
@@ -843,13 +1010,21 @@ function MapCanvas({ apiKey, stops, selectedStopId, fitSignal, onSelectStop }: M
   }
 
   return (
+    <>
     <GoogleMap
       mapContainerStyle={mapContainerStyle}
       center={usCenter}
       zoom={4}
       onLoad={(map) => {
         mapRef.current = map;
+        setMapInstance(map);
         fitAllStops(map);
+      }}
+      onUnmount={() => {
+        routePolylinesRef.current.forEach((polyline) => polyline.setMap(null));
+        routePolylinesRef.current = [];
+        mapRef.current = null;
+        setMapInstance(null);
       }}
       options={{
         streetViewControl: false,
@@ -859,7 +1034,7 @@ function MapCanvas({ apiKey, stops, selectedStopId, fitSignal, onSelectStop }: M
         styles: mapStyles,
       }}
     >
-      {path.length > 1 && (
+      {routeStatus === 'fallback' && path.length > 1 && (
         <PolylineF
           path={path}
           options={{
@@ -905,6 +1080,16 @@ function MapCanvas({ apiKey, stops, selectedStopId, fitSignal, onSelectStop }: M
         </InfoWindowF>
       )}
     </GoogleMap>
+    {routeStatus === 'loading' && <div className="route-status">Calculating driving route...</div>}
+    {routeStatus === 'fallback' && (
+      <div className="route-status warning">
+        Driving route unavailable{routeError ? ` (${routeError})` : ''}; showing estimated path.
+      </div>
+    )}
+    {routeStatus === 'ready' && routeWarnings.length > 0 && (
+      <div className="route-status warning">{routeWarnings.join(' ')}</div>
+    )}
+    </>
   );
 }
 
