@@ -660,8 +660,35 @@ textarea:focus {
 }
 
 .route-status.warning {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
   border-color: rgba(159, 45, 85, 0.18);
   color: #9f2d55;
+  text-align: left;
+}
+
+.route-status.warning span {
+  min-width: 0;
+}
+
+.route-status-close {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(159, 45, 85, 0.1);
+  color: #9f2d55;
+  cursor: pointer;
+}
+
+.route-status-close:hover {
+  background: rgba(159, 45, 85, 0.18);
 }
 
 .detail-panel {

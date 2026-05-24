@@ -1448,6 +1448,7 @@ function MapCanvas({
   const [routeWarnings, setRouteWarnings] = useState<string[]>([]);
   const [routeStatus, setRouteStatus] = useState<'idle' | 'loading' | 'ready' | 'fallback'>('idle');
   const [routeError, setRouteError] = useState('');
+  const [routeNoticeDismissed, setRouteNoticeDismissed] = useState(false);
   const selectedStop = useMemo(
     () => stops.find((stop) => stop.id === selectedStopId) || null,
     [selectedStopId, stops],
@@ -1492,6 +1493,7 @@ function MapCanvas({
       setRouteStatus('idle');
       setRouteError('');
       setRouteWarnings([]);
+      setRouteNoticeDismissed(false);
       onRouteDistanceChange(null);
       onDriveEstimatesChange(null);
       return undefined;
@@ -1502,6 +1504,7 @@ function MapCanvas({
     setRouteStatus('loading');
     setRouteError('');
     setRouteWarnings([]);
+    setRouteNoticeDismissed(false);
     onRouteDistanceChange(null);
     onDriveEstimatesChange(null);
 
@@ -1535,6 +1538,7 @@ function MapCanvas({
           setRouteStatus('ready');
           setRouteError('');
           setRouteWarnings(routes.flatMap((route) => route.warnings || []));
+          setRouteNoticeDismissed(false);
           onRouteDistanceChange(calculateRoadRouteMiles(routes));
           onDriveEstimatesChange(buildRoadDriveEstimates(routes, stops));
         })
@@ -1545,6 +1549,7 @@ function MapCanvas({
           setRouteStatus('fallback');
           setRouteError(error.message);
           setRouteWarnings([]);
+          setRouteNoticeDismissed(false);
           onRouteDistanceChange(null);
           onDriveEstimatesChange(null);
         });
@@ -1648,13 +1653,33 @@ function MapCanvas({
       )}
     </GoogleMap>
     {routeStatus === 'loading' && <div className="route-status">Calculating driving route...</div>}
-    {routeStatus === 'fallback' && (
+    {routeStatus === 'fallback' && !routeNoticeDismissed && (
       <div className="route-status warning">
-        Driving route unavailable{routeError ? ` (${routeError})` : ''}; showing estimated path.
+        <span>Driving route unavailable{routeError ? ` (${routeError})` : ''}; showing estimated path.</span>
+        <button
+          type="button"
+          className="route-status-close"
+          onClick={() => setRouteNoticeDismissed(true)}
+          title="Dismiss route notice"
+          aria-label="Dismiss route notice"
+        >
+          <X size={14} />
+        </button>
       </div>
     )}
-    {routeStatus === 'ready' && routeWarnings.length > 0 && (
-      <div className="route-status warning">{routeWarnings.join(' ')}</div>
+    {routeStatus === 'ready' && routeWarnings.length > 0 && !routeNoticeDismissed && (
+      <div className="route-status warning">
+        <span>{routeWarnings.join(' ')}</span>
+        <button
+          type="button"
+          className="route-status-close"
+          onClick={() => setRouteNoticeDismissed(true)}
+          title="Dismiss route notice"
+          aria-label="Dismiss route notice"
+        >
+          <X size={14} />
+        </button>
+      </div>
     )}
     </>
   );
