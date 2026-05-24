@@ -1300,7 +1300,7 @@ function App() {
             id="route-assistant-prompt"
             value={routeAssistantPrompt}
             onChange={(event) => setRouteAssistantPrompt(event.currentTarget.value)}
-            placeholder="Add a night in Denver, skip toll roads, or make the route more coastal"
+            placeholder="Add a night in Denver or make the middle route more coastal; start/end stay locked"
           />
           <button
             type="submit"

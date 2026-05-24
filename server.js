@@ -168,6 +168,90 @@ function normalizeTrip(value) {
   };
 }
 
+function isDateOnly(value) {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function clampDateToRange(date, startDate, endDate) {
+  if (!isDateOnly(date) || !isDateOnly(startDate) || !isDateOnly(endDate) || startDate > endDate) {
+    return date;
+  }
+
+  if (date < startDate) return startDate;
+  if (date > endDate) return endDate;
+  return date;
+}
+
+function isSameLockedStop(stop, lockedStop) {
+  return (
+    stop.id === lockedStop.id ||
+    (
+      stop.date === lockedStop.date &&
+      stop.label.trim().toLowerCase() === lockedStop.label.trim().toLowerCase() &&
+      Math.abs(stop.lat - lockedStop.lat) < 0.00001 &&
+      Math.abs(stop.lng - lockedStop.lng) < 0.00001
+    )
+  );
+}
+
+function makeLockedStop(stop, order) {
+  return {
+    ...stop,
+    order,
+  };
+}
+
+function buildRouteAssistantLocks(trip) {
+  const start = trip.stops[0];
+  const end = trip.stops[trip.stops.length - 1];
+
+  return {
+    start: {
+      order: 1,
+      date: start.date,
+      label: start.label,
+      lat: start.lat,
+      lng: start.lng,
+    },
+    end: {
+      order: trip.stops.length,
+      date: end.date,
+      label: end.label,
+      lat: end.lat,
+      lng: end.lng,
+    },
+    dateRange: {
+      startDate: start.date,
+      endDate: end.date,
+    },
+  };
+}
+
+function enforceRouteAssistantLocks(originalTrip, proposedTrip) {
+  const lockedStart = originalTrip.stops[0];
+  const lockedEnd = originalTrip.stops[originalTrip.stops.length - 1];
+  const hasDistinctEnd = originalTrip.stops.length > 1;
+  const proposedMiddle = proposedTrip.stops
+    .filter((stop) => {
+      if (isSameLockedStop(stop, lockedStart)) return false;
+      if (hasDistinctEnd && isSameLockedStop(stop, lockedEnd)) return false;
+      return true;
+    })
+    .map((stop) => ({
+      ...stop,
+      date: clampDateToRange(stop.date, lockedStart.date, lockedEnd.date),
+    }));
+
+  const stops = hasDistinctEnd
+    ? [makeLockedStop(lockedStart, 1), ...proposedMiddle, makeLockedStop(lockedEnd, proposedMiddle.length + 2)]
+    : [makeLockedStop(lockedStart, 1), ...proposedMiddle];
+
+  return normalizeTrip({
+    ...proposedTrip,
+    stops,
+  }) || proposedTrip;
+}
+
 function extractOpenAIText(payload) {
   if (typeof payload?.output_text === 'string') return payload.output_text;
 
@@ -222,6 +306,8 @@ async function handleApi(request, response, url) {
       return;
     }
 
+    const lockedAnchors = buildRouteAssistantLocks(trip);
+
     const openaiResponse = await fetch('https://api.openai.com/v1/responses', {
       method: 'POST',
       headers: {
@@ -234,6 +320,9 @@ async function handleApi(request, response, url) {
           'You are a route-planning assistant for a road-trip planner.',
           'Return only the requested structured JSON.',
           'Revise the supplied trip according to the user request. You may add, remove, reorder, rename, or adjust stops.',
+          'The first and last stops are locked anchors. Keep them as the first and last stops with the same date, label, latitude, and longitude.',
+          'The locked start/end date range cannot change. Keep all dated stops inside that inclusive range when both dates are known.',
+          'If the user asks to change a locked start/end date or location, ignore that part and explain in the summary that those anchors stayed locked.',
           'Preserve useful existing dates, notes, remoteWork flags, and stops unless the user asks to change them.',
           'Use approximate latitude and longitude for well-known places when adding stops.',
           'Every stop must have order starting at 1, a human-readable label, numeric lat/lng, notes, date, and remoteWork.',
@@ -242,6 +331,7 @@ async function handleApi(request, response, url) {
         ].join(' '),
         input: JSON.stringify({
           instruction,
+          lockedAnchors,
           trip,
         }),
         max_output_tokens: 12000,
@@ -278,9 +368,11 @@ async function handleApi(request, response, url) {
       return;
     }
 
+    const anchoredTrip = enforceRouteAssistantLocks(trip, proposedTrip);
+
     sendJson(response, 200, {
-      summary: proposal.summary,
-      trip: proposedTrip,
+      summary: `${proposal.summary} Start/end date and locations stayed locked.`,
+      trip: anchoredTrip,
     });
     return;
   }
