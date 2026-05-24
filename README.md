@@ -1,39 +1,33 @@
 # Road Trip Planner
 
-A lightweight road trip planning web app that:
+A small React + TypeScript + Vite web app that visualizes a USA road trip itinerary on Google Maps.
 
-- Integrates with Google Maps to display an interactive map
-- Lets you click to mark locations and save stops
-- Supports photo uploads for saved stops
-- Stores plans and stops in a local SQLite database
-- Searches ideas to do generally or along a selected route
-- Exports plan details by email through SMTP
-
-## Setup
+## Local setup
 
 1. Install dependencies:
    ```bash
    npm install
    ```
-2. Set environment variables:
-   - `GOOGLE_MAPS_API_KEY` (required for map/search features)
-   - `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` (required for email export)
-   - Optional: `SMTP_SECURE=true|false` to override SMTP TLS mode
-   - Optional: `SMTP_FROM`, `PORT`
-   - For security, restrict the Google Maps API key to your allowed domains/referrers in Google Cloud Console.
-3. Start the app:
+2. Create a local env file from the example:
    ```bash
-   npm start
+   cp .env.example .env
    ```
-4. Open `http://localhost:3000`
-
-## Data storage
-
-The app creates a SQLite database at `data/roadtrip.sqlite` automatically.
-Uploaded images are stored in `uploads/`.
+3. Add your Google Maps API key to `.env`:
+   ```env
+   VITE_GOOGLE_MAPS_API_KEY=your_api_key_here
+   ```
+4. Start the app:
+   ```bash
+   npm run dev
+   ```
 
 ## Railway deployment
 
-- Use the committed lockfile when installing dependencies (`npm ci` is recommended for deploys).
-- Start the app with `npm start`.
-- This project uses `better-sqlite3` (not `sqlite3`) to avoid incompatible prebuilt `sqlite3` binaries that can fail to load on Railway with glibc errors.
+1. Deploy this repository from GitHub to Railway.
+2. In Railway project variables, add:
+   - `VITE_GOOGLE_MAPS_API_KEY` with your real API key.
+3. Railway will build and run using:
+   - Build: `npm run build`
+   - Start: `npm run start`
+
+> Do not commit real API keys. Keep them in local `.env` files and Railway environment variables.
