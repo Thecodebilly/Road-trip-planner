@@ -1868,6 +1868,7 @@ function MapCanvas({
         mapTypeControl: false,
         fullscreenControl: false,
         clickableIcons: false,
+        gestureHandling: 'cooperative',
         styles: mapStyles,
       }}
     >
