@@ -78,7 +78,7 @@ type HotelCandidate = {
   position: google.maps.LatLngLiteral;
   rating: number | null;
   userRatingsTotal: number | null;
-  priceLevel: number | null;
+  priceLevel: google.maps.places.PriceLevel | null;
   vicinity: string;
   searchLabel: string;
   distanceFromSearchMiles: number;
@@ -755,20 +755,47 @@ function groupMapStops(stops: TripStop[]): MapStopGroup[] {
   });
 }
 
-function formatHotelPrice(priceLevel: number | null) {
-  if (priceLevel === null || priceLevel === undefined) return 'Price n/a';
-  if (priceLevel <= 0) return 'Budget';
+function hotelPriceRank(priceLevel: google.maps.places.PriceLevel | null) {
+  switch (priceLevel) {
+    case google.maps.places.PriceLevel.FREE:
+      return 0;
+    case google.maps.places.PriceLevel.INEXPENSIVE:
+      return 1;
+    case google.maps.places.PriceLevel.MODERATE:
+      return 2;
+    case google.maps.places.PriceLevel.EXPENSIVE:
+      return 3;
+    case google.maps.places.PriceLevel.VERY_EXPENSIVE:
+      return 4;
+    default:
+      return 2;
+  }
+}
 
-  return '$'.repeat(Math.min(priceLevel, 4));
+function formatHotelPrice(priceLevel: google.maps.places.PriceLevel | null) {
+  switch (priceLevel) {
+    case google.maps.places.PriceLevel.FREE:
+      return 'Free';
+    case google.maps.places.PriceLevel.INEXPENSIVE:
+      return '$';
+    case google.maps.places.PriceLevel.MODERATE:
+      return '$$';
+    case google.maps.places.PriceLevel.EXPENSIVE:
+      return '$$$';
+    case google.maps.places.PriceLevel.VERY_EXPENSIVE:
+      return '$$$$';
+    default:
+      return 'Price n/a';
+  }
 }
 
 function scoreHotelCandidate(
-  priceLevel: number | null,
+  priceLevel: google.maps.places.PriceLevel | null,
   rating: number | null,
   userRatingsTotal: number | null,
   distanceFromSearchMiles: number,
 ) {
-  const priceScore = (4 - Math.min(priceLevel ?? 2, 4)) * 18;
+  const priceScore = (4 - hotelPriceRank(priceLevel)) * 18;
   const ratingScore = (rating ?? 3.4) * 12;
   const reviewScore = Math.min(Math.log10((userRatingsTotal ?? 0) + 1), 4) * 5;
   const proximityPenalty = Math.min(distanceFromSearchMiles, 12) * 1.4;
@@ -827,61 +854,59 @@ function buildRouteHotelSearchPoints(polylines: google.maps.Polyline[], stops: T
   return sampledRoutePoints.length ? sampledRoutePoints : buildStopHotelSearchPoints(stops);
 }
 
-function normalizeHotelResult(
-  place: google.maps.places.PlaceResult,
+function normalizeHotelPlace(
+  place: google.maps.places.Place,
   searchPoint: HotelSearchPoint,
 ): HotelCandidate | null {
-  const location = place.geometry?.location;
-  if (!place.place_id || !place.name || !location) return null;
-  if (place.business_status && place.business_status !== google.maps.places.BusinessStatus.OPERATIONAL) return null;
+  const location = place.location;
+  if (!place.id || !place.displayName || !location) return null;
+  if (place.businessStatus && place.businessStatus !== google.maps.places.BusinessStatus.OPERATIONAL) return null;
 
   const position = { lat: location.lat(), lng: location.lng() };
   const rating = typeof place.rating === 'number' ? place.rating : null;
-  const userRatingsTotal = typeof place.user_ratings_total === 'number' ? place.user_ratings_total : null;
-  const priceLevel = typeof place.price_level === 'number' ? place.price_level : null;
+  const userRatingsTotal = typeof place.userRatingCount === 'number' ? place.userRatingCount : null;
+  const priceLevel = place.priceLevel || null;
   const distanceFromSearchMiles = calculatePointMiles(position, searchPoint.position);
 
   return {
-    id: place.place_id,
-    name: place.name,
+    id: place.id,
+    name: place.displayName,
     position,
     rating,
     userRatingsTotal,
     priceLevel,
-    vicinity: place.vicinity || '',
+    vicinity: place.formattedAddress || '',
     searchLabel: searchPoint.label,
     distanceFromSearchMiles,
     score: scoreHotelCandidate(priceLevel, rating, userRatingsTotal, distanceFromSearchMiles),
   };
 }
 
-function searchHotelsNearPoint(
-  service: google.maps.places.PlacesService,
+async function searchHotelsNearPoint(
+  placesLibrary: google.maps.PlacesLibrary,
   searchPoint: HotelSearchPoint,
 ) {
-  return new Promise<google.maps.places.PlaceResult[]>((resolve, reject) => {
-    service.nearbySearch(
-      {
-        location: searchPoint.position,
-        radius: hotelSearchRadiusMeters,
-        type: 'lodging',
-        keyword: 'hotel',
-      },
-      (results, status) => {
-        if (status === google.maps.places.PlacesServiceStatus.OK) {
-          resolve(results || []);
-          return;
-        }
-
-        if (status === google.maps.places.PlacesServiceStatus.ZERO_RESULTS) {
-          resolve([]);
-          return;
-        }
-
-        reject(new Error(status));
-      },
-    );
+  const { places } = await placesLibrary.Place.searchNearby({
+    fields: [
+      'id',
+      'displayName',
+      'location',
+      'rating',
+      'userRatingCount',
+      'priceLevel',
+      'formattedAddress',
+      'businessStatus',
+    ],
+    includedPrimaryTypes: ['hotel'],
+    locationRestriction: {
+      center: searchPoint.position,
+      radius: hotelSearchRadiusMeters,
+    },
+    maxResultCount: 12,
+    rankPreference: placesLibrary.SearchNearbyRankPreference.POPULARITY,
   });
+
+  return places;
 }
 
 function splitStopsForDirections(stops: TripStop[]) {
@@ -2261,15 +2286,7 @@ function MapCanvas({
       return undefined;
     }
 
-    if (!google.maps.places) {
-      setHotelCandidates([]);
-      setHotelStatus('error');
-      setHotelMessage('Hotel search needs Places enabled for this Google Maps key.');
-      return undefined;
-    }
-
     let canceled = false;
-    const service = new google.maps.places.PlacesService(mapInstance);
 
     setHotelCandidates([]);
     setSelectedHotelId(null);
@@ -2279,14 +2296,26 @@ function MapCanvas({
     const runSearch = async () => {
       const candidatesById = new Map<string, HotelCandidate>();
       let failedSearches = 0;
+      let placesLibrary: google.maps.PlacesLibrary;
+
+      try {
+        placesLibrary = await google.maps.importLibrary('places') as google.maps.PlacesLibrary;
+      } catch {
+        if (!canceled) {
+          setHotelCandidates([]);
+          setHotelStatus('error');
+          setHotelMessage('Hotel search needs Places API (New) enabled for this Google Maps key.');
+        }
+        return;
+      }
 
       for (const searchPoint of hotelSearchPoints) {
         if (canceled) return;
 
         try {
-          const results = await searchHotelsNearPoint(service, searchPoint);
+          const results = await searchHotelsNearPoint(placesLibrary, searchPoint);
           results
-            .map((place) => normalizeHotelResult(place, searchPoint))
+            .map((place) => normalizeHotelPlace(place, searchPoint))
             .filter((candidate): candidate is HotelCandidate => Boolean(candidate))
             .forEach((candidate) => {
               const existing = candidatesById.get(candidate.id);
