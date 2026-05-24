@@ -450,6 +450,40 @@ textarea:focus {
   gap: 0.15rem;
 }
 
+.saved-actions {
+  display: flex;
+  align-items: center;
+  padding-right: 0.25rem;
+}
+
+.format-section {
+  border-bottom: 0;
+}
+
+.format-copy {
+  margin: 0;
+  color: #667085;
+  font-size: 0.84rem;
+}
+
+.format-example {
+  max-height: 260px;
+  margin: 0;
+  overflow: auto;
+  padding: 0.75rem;
+  border: 1px solid #dfe5ec;
+  border-radius: 8px;
+  background: #17202a;
+  color: #eef6f5;
+  font-size: 0.74rem;
+  line-height: 1.45;
+}
+
+.format-example code {
+  padding: 0;
+  background: transparent;
+}
+
 .empty-copy {
   margin: 0;
   color: #667085;

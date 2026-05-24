@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronUp,
   Copy,
+  Download,
   FilePlus2,
   FolderOpen,
   LocateFixed,
@@ -41,6 +42,12 @@ type Trip = {
   updatedAt: string;
 };
 
+type ExportedTrip = {
+  format: 'road-trip-planner.saved-trip.v1';
+  exportedAt: string;
+  trip: Trip;
+};
+
 type MapCanvasProps = {
   apiKey: string;
   stops: TripStop[];
@@ -54,6 +61,33 @@ const usCenter = { lat: 39.8283, lng: -98.5795 };
 const savedTripsKey = 'road-trip-planner.savedTrips.v1';
 const activeTripKey = 'road-trip-planner.activeTrip.v1';
 const defaultTripId = 'default-2026-usa-itinerary';
+const exportFormatExample = JSON.stringify(
+  {
+    format: 'road-trip-planner.saved-trip.v1',
+    exportedAt: '2026-05-24T00:00:00.000Z',
+    trip: {
+      id: 'trip-example',
+      name: 'Southwest loop',
+      notes: 'Museum stops, desert drives, remote-work days.',
+      createdAt: '2026-05-24T00:00:00.000Z',
+      updatedAt: '2026-05-24T00:00:00.000Z',
+      stops: [
+        {
+          id: 'stop-example-1',
+          order: 1,
+          date: '2026-07-21',
+          label: 'Jacksonville, FL',
+          lat: 30.3322,
+          lng: -81.6557,
+          notes: 'Start',
+          remoteWork: false,
+        },
+      ],
+    },
+  },
+  null,
+  2,
+);
 
 const seedStops = [...(tripStops as ImportedTripStop[])]
   .sort((a, b) => a.order - b.order)
@@ -192,6 +226,40 @@ function writeStorage(key: string, value: unknown) {
   } catch {
     // localStorage can be unavailable in private browsing or locked-down embeds.
   }
+}
+
+function createTripExport(trip: Trip): ExportedTrip {
+  return {
+    format: 'road-trip-planner.saved-trip.v1',
+    exportedAt: new Date().toISOString(),
+    trip: normalizeTrip(trip) || trip,
+  };
+}
+
+function sanitizeFileName(value: string) {
+  const fileName = value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+
+  return fileName || 'road-trip';
+}
+
+function downloadTripExport(trip: Trip) {
+  const exportedTrip = createTripExport(trip);
+  const blob = new Blob([`${JSON.stringify(exportedTrip, null, 2)}\n`], {
+    type: 'application/json',
+  });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+
+  link.href = url;
+  link.download = `${sanitizeFileName(exportedTrip.trip.name)}.trip.json`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
 }
 
 function formatDate(date: string) {
@@ -387,6 +455,12 @@ function App() {
     setSaveMessage(`Saved ${formatDateTime(now)}`);
   };
 
+  const exportActiveTrip = () => {
+    const tripToExport = normalizeTrip({ ...activeTrip, stops }) || activeTrip;
+    downloadTripExport(tripToExport);
+    setSaveMessage('Exported JSON');
+  };
+
   const startNewTrip = () => {
     const newTrip = createBlankTrip();
     setActiveTrip(newTrip);
@@ -431,6 +505,15 @@ function App() {
           {saveMessage && <span className="save-status">{saveMessage}</span>}
           <button type="button" className="icon-button" onClick={startNewTrip} title="New trip">
             <FilePlus2 size={18} />
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={exportActiveTrip}
+            title="Export active trip"
+            aria-label="Export active trip"
+          >
+            <Download size={18} />
           </button>
           <button type="button" className="primary-button" onClick={saveTrip}>
             <Save size={18} />
@@ -538,20 +621,43 @@ function App() {
                         <small>{formatDateTime(trip.updatedAt)}</small>
                       </span>
                     </button>
-                    <button
-                      type="button"
-                      className="icon-button ghost"
-                      onClick={() => removeSavedTrip(trip.id)}
-                      title="Delete saved trip"
-                    >
-                      <Trash2 size={16} />
-                    </button>
+                    <span className="saved-actions">
+                      <button
+                        type="button"
+                        className="icon-button ghost"
+                        onClick={() => downloadTripExport(trip)}
+                        title="Export saved trip"
+                        aria-label={`Export ${trip.name}`}
+                      >
+                        <Download size={16} />
+                      </button>
+                      <button
+                        type="button"
+                        className="icon-button ghost"
+                        onClick={() => removeSavedTrip(trip.id)}
+                        title="Delete saved trip"
+                        aria-label={`Delete ${trip.name}`}
+                      >
+                        <Trash2 size={16} />
+                      </button>
+                    </span>
                   </article>
                 ))}
               </div>
             ) : (
               <p className="empty-copy">No saved trips yet.</p>
             )}
+          </section>
+
+          <section className="panel-section format-section">
+            <div className="section-heading">
+              <h2>Export Format</h2>
+              <span>JSON</span>
+            </div>
+            <p className="format-copy">Saved trips export as versioned JSON files.</p>
+            <pre className="format-example" aria-label="Saved trip export JSON example">
+              <code>{exportFormatExample}</code>
+            </pre>
           </section>
         </aside>
 
