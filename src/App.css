@@ -34,7 +34,7 @@ button {
 .app-shell {
   height: 100vh;
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
   background:
     linear-gradient(180deg, rgba(15, 118, 110, 0.07), rgba(246, 248, 251, 0) 34%),
@@ -153,6 +153,51 @@ button {
   flex-wrap: wrap;
 }
 
+.view-tabs {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.25rem;
+  border: 1px solid #dfe5ec;
+  border-radius: 8px;
+  background: #f9fbfc;
+}
+
+.view-tab {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  padding: 0 0.7rem;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: #47615d;
+  cursor: pointer;
+  font-size: 0.84rem;
+  font-weight: 800;
+}
+
+.view-tab.active {
+  background: #ffffff;
+  color: #115e59;
+  box-shadow: 0 6px 16px rgba(23, 32, 42, 0.08);
+}
+
+.view-tab span {
+  min-width: 1.35rem;
+  height: 1.35rem;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 0.38rem;
+  border-radius: 999px;
+  background: #edf2f7;
+  color: #344054;
+  font-size: 0.72rem;
+}
+
 .save-status {
   color: #47615d;
   font-size: 0.84rem;
@@ -167,6 +212,12 @@ button {
   min-height: 0;
   display: grid;
   grid-template-columns: minmax(300px, 360px) minmax(440px, 1fr) minmax(300px, 360px);
+}
+
+.editor-page {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
 }
 
 .left-panel,
@@ -545,6 +596,109 @@ textarea:focus {
 .saved-actions .icon-button {
   width: 34px;
   height: 34px;
+}
+
+.saved-page {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 1.25rem;
+}
+
+.saved-page-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  max-width: 1180px;
+  margin: 0 auto 1rem;
+}
+
+.saved-page-header h2,
+.saved-page-header p {
+  margin: 0;
+}
+
+.saved-page-header h2 {
+  font-size: 1.35rem;
+  line-height: 1.15;
+}
+
+.saved-page-header p {
+  margin-top: 0.2rem;
+  color: #667085;
+  font-size: 0.9rem;
+}
+
+.saved-page-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.saved-page-actions .secondary-button {
+  flex: 0 0 auto;
+}
+
+.saved-page-grid {
+  max-width: 1180px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
+  gap: 1rem;
+  margin: 0 auto;
+}
+
+.saved-library,
+.saved-format-panel {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 0.8rem;
+  padding: 1rem;
+  border: 1px solid #dfe5ec;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.saved-list-page {
+  gap: 0.65rem;
+}
+
+.saved-card-page {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.saved-card-page .saved-main {
+  padding: 0.8rem;
+}
+
+.saved-card-page .saved-main svg {
+  color: #115e59;
+}
+
+.saved-card-page .saved-actions {
+  gap: 0.18rem;
+}
+
+.saved-edit-button {
+  min-height: 34px;
+  flex: 0 0 auto;
+  padding: 0 0.65rem;
+}
+
+.saved-empty {
+  min-height: 220px;
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 0.75rem;
+  border: 1px dashed #cfd8e3;
+  border-radius: 8px;
+  color: #667085;
+  text-align: center;
+}
+
+.saved-empty p {
+  margin: 0;
 }
 
 .format-section {
@@ -1072,6 +1226,10 @@ code {
     grid-template-rows: minmax(460px, 1fr) auto;
   }
 
+  .saved-page-grid {
+    grid-template-columns: 1fr;
+  }
+
   .detail-panel {
     grid-column: 1 / -1;
     border-top: 1px solid #dfe5ec;
@@ -1122,6 +1280,36 @@ code {
   .topbar-actions {
     width: 100%;
     justify-content: flex-start;
+  }
+
+  .view-tabs {
+    width: 100%;
+  }
+
+  .view-tab {
+    flex: 1;
+  }
+
+  .saved-page {
+    padding: 0.85rem;
+  }
+
+  .saved-page-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .saved-page-actions {
+    flex-wrap: wrap;
+  }
+
+  .saved-card-page {
+    grid-template-columns: 1fr;
+  }
+
+  .saved-card-page .saved-actions {
+    justify-content: flex-start;
+    padding: 0 0.65rem 0.65rem;
   }
 
   .workspace {

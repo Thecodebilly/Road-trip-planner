@@ -101,6 +101,7 @@ type ExportedTrip = {
 };
 
 type SaveBackend = 'checking' | 'database' | 'local';
+type AppView = 'editor' | 'saved';
 
 type RouteAssistantResult = {
   summary: string;
@@ -586,6 +587,12 @@ function formatMapGroupHeading(stops: TripStop[]) {
   return `${labels[0]} + ${labels.length - 1} more`;
 }
 
+function formatStopDateRange(stops: TripStop[]) {
+  if (!stops.length) return 'No stops';
+
+  return `${formatDate(stops[0].date)} - ${formatDate(stops[stops.length - 1].date)}`;
+}
+
 function isWeekendDate(date: string) {
   if (!date) return false;
 
@@ -934,6 +941,7 @@ function App() {
   const [locationMessage, setLocationMessage] = useState('');
   const [isLocating, setIsLocating] = useState(false);
   const [showHotelFinder, setShowHotelFinder] = useState(false);
+  const [currentView, setCurrentView] = useState<AppView>('editor');
   const [saveMessage, setSaveMessage] = useState('');
   const [routeAssistantPrompt, setRouteAssistantPrompt] = useState('');
   const [routeAssistantMessage, setRouteAssistantMessage] = useState('');
@@ -966,10 +974,7 @@ function App() {
   const displayDriveMinutes = sumDriveMinutes(driveEstimates);
   const displayGasCost = formatGasCost(displayMiles, gasPrice, fuelMpg);
   const remoteStops = useMemo(() => stops.filter((stop) => stop.remoteWork).length, [stops]);
-  const dateRange = useMemo(() => {
-    if (!stops.length) return 'No stops';
-    return `${formatDate(stops[0].date)} - ${formatDate(stops[stops.length - 1].date)}`;
-  }, [stops]);
+  const dateRange = useMemo(() => formatStopDateRange(stops), [stops]);
   const saveBackendLabel =
     saveBackend === 'database' ? 'DB' : saveBackend === 'local' ? 'Local' : 'Sync';
   const previewJson = useMemo(
@@ -1285,6 +1290,7 @@ function App() {
       setActiveTrip(importedTrip);
       setSelectedStopId(importedTrip.stops[0]?.id || null);
       setSavedTrips(nextSavedTrips);
+      setCurrentView('editor');
       setFitSignal((value) => value + 1);
       if (closeModal) {
         setShowImportModal(false);
@@ -1355,6 +1361,7 @@ function App() {
       setRoadDriveEstimates(null);
       setActiveTrip(proposedTrip);
       setSelectedStopId(proposedTrip.stops[0]?.id || null);
+      setCurrentView('editor');
       setFitSignal((value) => value + 1);
       setRouteAssistantPrompt('');
       setRouteAssistantMessage(`${result.summary} Save the draft when ready.`);
@@ -1408,6 +1415,7 @@ function App() {
     setRoadDriveEstimates(null);
     setActiveTrip(newTrip);
     setSelectedStopId(newTrip.stops[0].id);
+    setCurrentView('editor');
     setSaveMessage('');
     setFitSignal((value) => value + 1);
   };
@@ -1420,6 +1428,7 @@ function App() {
     setRoadDriveEstimates(null);
     setActiveTrip(nextTrip);
     setSelectedStopId(nextTrip.stops[0]?.id || null);
+    setCurrentView('editor');
     setSaveMessage(`Loaded ${nextTrip.name}`);
     setFitSignal((value) => value + 1);
   };
@@ -1450,30 +1459,6 @@ function App() {
 
   return (
     <div className="app-shell">
-      <section className="route-assistant-bar" aria-label="AI route editor">
-        <span className="route-assistant-icon" aria-hidden="true">
-          <Sparkles size={18} />
-        </span>
-        <form className="route-assistant-form" onSubmit={applyRouteAssistant}>
-          <label htmlFor="route-assistant-prompt">AI route edit</label>
-          <input
-            id="route-assistant-prompt"
-            value={routeAssistantPrompt}
-            onChange={(event) => setRouteAssistantPrompt(event.currentTarget.value)}
-            placeholder="Add a night in Denver or make the middle route more coastal; start/end stay locked"
-          />
-          <button
-            type="submit"
-            className="primary-button"
-            disabled={isRouteAssistantWorking || !routeAssistantPrompt.trim()}
-          >
-            <Sparkles size={17} />
-            <span>{isRouteAssistantWorking ? 'Working' : 'Update route'}</span>
-          </button>
-        </form>
-        {routeAssistantMessage && <p className="route-assistant-message">{routeAssistantMessage}</p>}
-      </section>
-
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark" aria-hidden="true">
@@ -1484,6 +1469,24 @@ function App() {
             <p>{dateRange}</p>
           </span>
         </div>
+
+        <nav className="view-tabs" aria-label="Primary views">
+          <button
+            type="button"
+            className={currentView === 'editor' ? 'view-tab active' : 'view-tab'}
+            onClick={() => setCurrentView('editor')}
+          >
+            Editor
+          </button>
+          <button
+            type="button"
+            className={currentView === 'saved' ? 'view-tab active' : 'view-tab'}
+            onClick={() => setCurrentView('saved')}
+          >
+            Saved trips
+            <span>{savedTrips.length}</span>
+          </button>
+        </nav>
 
         <div className="topbar-actions" aria-label="Trip actions">
           {saveMessage && <span className="save-status">{saveMessage}</span>}
@@ -1518,32 +1521,62 @@ function App() {
           >
             <Import size={18} />
           </button>
-          <button
-            type="button"
-            className="icon-button"
-            onClick={previewActiveTrip}
-            title="Preview active trip JSON"
-            aria-label="Preview active trip JSON"
-          >
-            <Eye size={18} />
-          </button>
-          <button
-            type="button"
-            className="icon-button"
-            onClick={exportActiveTrip}
-            title="Export active trip"
-            aria-label="Export active trip"
-          >
-            <Download size={18} />
-          </button>
-          <button type="button" className="primary-button" onClick={saveTrip} disabled={isSaving}>
-            <Save size={18} />
-            <span>{isSaving ? 'Saving' : 'Save trip'}</span>
-          </button>
+          {currentView === 'editor' && (
+            <>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={previewActiveTrip}
+                title="Preview active trip JSON"
+                aria-label="Preview active trip JSON"
+              >
+                <Eye size={18} />
+              </button>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={exportActiveTrip}
+                title="Export active trip"
+                aria-label="Export active trip"
+              >
+                <Download size={18} />
+              </button>
+              <button type="button" className="primary-button" onClick={saveTrip} disabled={isSaving}>
+                <Save size={18} />
+                <span>{isSaving ? 'Saving' : 'Save trip'}</span>
+              </button>
+            </>
+          )}
         </div>
       </header>
 
-      <main className="workspace">
+      {currentView === 'editor' ? (
+      <main className="editor-page">
+        <section className="route-assistant-bar" aria-label="AI route editor">
+          <span className="route-assistant-icon" aria-hidden="true">
+            <Sparkles size={18} />
+          </span>
+          <form className="route-assistant-form" onSubmit={applyRouteAssistant}>
+            <label htmlFor="route-assistant-prompt">AI route edit</label>
+            <input
+              id="route-assistant-prompt"
+              value={routeAssistantPrompt}
+              onChange={(event) => setRouteAssistantPrompt(event.currentTarget.value)}
+              placeholder="Add a night in Denver or make the middle route more coastal; start/end stay locked"
+            />
+            <button
+              type="submit"
+              className="primary-button"
+              disabled={isRouteAssistantWorking || !routeAssistantPrompt.trim()}
+            >
+              <Sparkles size={17} />
+              <span>{isRouteAssistantWorking ? 'Working' : 'Update route'}</span>
+            </button>
+          </form>
+          {routeAssistantMessage && <p className="route-assistant-message">{routeAssistantMessage}</p>}
+        </section>
+
+      <div className="workspace">
         <aside className="left-panel" aria-label="Trip itinerary">
           <section className="trip-editor">
             <label htmlFor="trip-name">Trip name</label>
@@ -1708,69 +1741,6 @@ function App() {
             </ol>
           </section>
 
-          <section className="panel-section saved-section">
-            <div className="section-heading">
-              <h2>Saved Trips</h2>
-              <span>{`${saveBackendLabel} ${savedTrips.length}`}</span>
-            </div>
-            {savedTrips.length ? (
-              <div className="saved-list">
-                {savedTrips.map((trip) => (
-                  <article key={trip.id} className="saved-card">
-                    <button type="button" className="saved-main" onClick={() => loadTrip(trip)}>
-                      <FolderOpen size={16} />
-                      <span>
-                        <strong>{trip.name}</strong>
-                        <small>{formatDateTime(trip.updatedAt)}</small>
-                      </span>
-                    </button>
-                    <span className="saved-actions">
-                      <button
-                        type="button"
-                        className="icon-button ghost"
-                        onClick={() => previewTripExport(trip)}
-                        title="Preview saved trip JSON"
-                        aria-label={`Preview ${trip.name} JSON`}
-                      >
-                        <Eye size={16} />
-                      </button>
-                      <button
-                        type="button"
-                        className="icon-button ghost"
-                        onClick={() => downloadTripExport(trip)}
-                        title="Export saved trip"
-                        aria-label={`Export ${trip.name}`}
-                      >
-                        <Download size={16} />
-                      </button>
-                      <button
-                        type="button"
-                        className="icon-button ghost"
-                        onClick={() => removeSavedTrip(trip.id)}
-                        title="Delete saved trip"
-                        aria-label={`Delete ${trip.name}`}
-                      >
-                        <Trash2 size={16} />
-                      </button>
-                    </span>
-                  </article>
-                ))}
-              </div>
-            ) : (
-              <p className="empty-copy">No saved trips yet.</p>
-            )}
-          </section>
-
-          <section className="panel-section format-section">
-            <div className="section-heading">
-              <h2>Export Format</h2>
-              <span>JSON</span>
-            </div>
-            <p className="format-copy">Saved trips export and import as versioned JSON files.</p>
-            <pre className="format-example" aria-label="Saved trip export JSON example">
-              <code>{exportFormatExample}</code>
-            </pre>
-          </section>
         </aside>
 
         <section className="map-panel" aria-label="Route map">
@@ -1904,7 +1874,110 @@ function App() {
             <p className="empty-copy">Select a stop to edit it.</p>
           )}
         </aside>
+      </div>
       </main>
+      ) : (
+        <main className="saved-page" aria-label="Saved trips page">
+          <section className="saved-page-header">
+            <span>
+              <h2>Saved Trips</h2>
+              <p>{saveBackend === 'database' ? 'Database-backed trip library' : 'Local trip library'}</p>
+            </span>
+            <div className="saved-page-actions">
+              <button type="button" className="secondary-button" onClick={startNewTrip}>
+                <FilePlus2 size={17} />
+                <span>New trip</span>
+              </button>
+              <button type="button" className="primary-button" onClick={() => setCurrentView('editor')}>
+                <Route size={17} />
+                <span>Open editor</span>
+              </button>
+            </div>
+          </section>
+
+          <section className="saved-page-grid">
+            <div className="saved-library">
+              <div className="section-heading">
+                <h2>Library</h2>
+                <span>{`${saveBackendLabel} ${savedTrips.length}`}</span>
+              </div>
+              {savedTrips.length ? (
+                <div className="saved-list saved-list-page">
+                  {savedTrips.map((trip) => (
+                    <article key={trip.id} className="saved-card saved-card-page">
+                      <button type="button" className="saved-main" onClick={() => loadTrip(trip)}>
+                        <FolderOpen size={18} />
+                        <span>
+                          <strong>{trip.name}</strong>
+                          <small>{formatStopDateRange(trip.stops)}</small>
+                          <small>{`${trip.stops.length} stops | Updated ${formatDateTime(trip.updatedAt)}`}</small>
+                        </span>
+                      </button>
+                      <span className="saved-actions">
+                        <button
+                          type="button"
+                          className="secondary-button saved-edit-button"
+                          onClick={() => loadTrip(trip)}
+                        >
+                          <FolderOpen size={16} />
+                          <span>Edit</span>
+                        </button>
+                        <button
+                          type="button"
+                          className="icon-button ghost"
+                          onClick={() => previewTripExport(trip)}
+                          title="Preview saved trip JSON"
+                          aria-label={`Preview ${trip.name} JSON`}
+                        >
+                          <Eye size={16} />
+                        </button>
+                        <button
+                          type="button"
+                          className="icon-button ghost"
+                          onClick={() => downloadTripExport(trip)}
+                          title="Export saved trip"
+                          aria-label={`Export ${trip.name}`}
+                        >
+                          <Download size={16} />
+                        </button>
+                        <button
+                          type="button"
+                          className="icon-button ghost"
+                          onClick={() => removeSavedTrip(trip.id)}
+                          title="Delete saved trip"
+                          aria-label={`Delete ${trip.name}`}
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      </span>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <div className="saved-empty">
+                  <FolderOpen size={28} />
+                  <p>No saved trips yet.</p>
+                  <button type="button" className="primary-button" onClick={startNewTrip}>
+                    <FilePlus2 size={17} />
+                    <span>Create one</span>
+                  </button>
+                </div>
+              )}
+            </div>
+
+            <aside className="saved-format-panel" aria-label="Trip JSON format">
+              <div className="section-heading">
+                <h2>Export Format</h2>
+                <span>JSON</span>
+              </div>
+              <p className="format-copy">Saved trips export and import as versioned JSON files.</p>
+              <pre className="format-example" aria-label="Saved trip export JSON example">
+                <code>{exportFormatExample}</code>
+              </pre>
+            </aside>
+          </section>
+        </main>
+      )}
 
       {previewExport && (
         <div className="json-modal-backdrop" role="presentation" onClick={() => setPreviewExport(null)}>
