@@ -296,6 +296,8 @@ textarea:focus {
   border-color: #0f766e;
 }
 
+.primary-button:disabled,
+.secondary-button:disabled,
 .icon-button:disabled {
   cursor: not-allowed;
   opacity: 0.42;
@@ -325,6 +327,7 @@ textarea:focus {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  padding: 0 0.55rem;
   border-radius: 999px;
   background: #edf2f7;
   color: #344054;

@@ -54,6 +54,8 @@ type ExportedTrip = {
   trip: Trip;
 };
 
+type SaveBackend = 'checking' | 'database' | 'local';
+
 type RoadRoute = {
   distanceMeters?: number;
   warnings?: string[];
@@ -260,6 +262,87 @@ function writeStorage(key: string, value: unknown) {
   }
 }
 
+function removeStorage(key: string) {
+  try {
+    window.localStorage.removeItem(key);
+  } catch {
+    // localStorage can be unavailable in private browsing or locked-down embeds.
+  }
+}
+
+function sortTripsByUpdatedAt(trips: Trip[]) {
+  return [...trips].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+}
+
+function mergeTripsByFreshness(...tripGroups: Trip[][]) {
+  const tripsById = new Map<string, Trip>();
+
+  tripGroups.flat().forEach((trip) => {
+    const normalizedTrip = normalizeTrip(trip);
+    if (!normalizedTrip) return;
+
+    const existingTrip = tripsById.get(normalizedTrip.id);
+    if (!existingTrip || normalizedTrip.updatedAt.localeCompare(existingTrip.updatedAt) > 0) {
+      tripsById.set(normalizedTrip.id, normalizedTrip);
+    }
+  });
+
+  return sortTripsByUpdatedAt([...tripsById.values()]);
+}
+
+async function fetchSavedTripsFromDatabase() {
+  const response = await fetch('/api/trips', {
+    headers: { accept: 'application/json' },
+  });
+
+  if (!response.ok) {
+    throw new Error(`GET_TRIPS_${response.status}`);
+  }
+
+  const trips = await response.json();
+  if (!Array.isArray(trips)) {
+    throw new Error('INVALID_TRIPS_RESPONSE');
+  }
+
+  return sortTripsByUpdatedAt(
+    trips
+      .map((trip) => normalizeTrip(trip))
+      .filter((trip): trip is Trip => Boolean(trip)),
+  );
+}
+
+async function saveTripToDatabase(trip: Trip) {
+  const response = await fetch(`/api/trips/${encodeURIComponent(trip.id)}`, {
+    method: 'PUT',
+    headers: {
+      accept: 'application/json',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(trip),
+  });
+
+  if (!response.ok) {
+    throw new Error(`SAVE_TRIP_${response.status}`);
+  }
+
+  const savedTrip = normalizeTrip(await response.json());
+  if (!savedTrip) {
+    throw new Error('INVALID_SAVED_TRIP_RESPONSE');
+  }
+
+  return savedTrip;
+}
+
+async function deleteTripFromDatabase(tripId: string) {
+  const response = await fetch(`/api/trips/${encodeURIComponent(tripId)}`, {
+    method: 'DELETE',
+  });
+
+  if (!response.ok) {
+    throw new Error(`DELETE_TRIP_${response.status}`);
+  }
+}
+
 function createTripExport(trip: Trip): ExportedTrip {
   return {
     format: 'road-trip-planner.saved-trip.v1',
@@ -392,6 +475,8 @@ function App() {
   );
   const [fitSignal, setFitSignal] = useState(0);
   const [saveMessage, setSaveMessage] = useState('');
+  const [saveBackend, setSaveBackend] = useState<SaveBackend>('checking');
+  const [isSaving, setIsSaving] = useState(false);
   const [drivingMiles, setDrivingMiles] = useState<number | null>(null);
 
   const stops = useMemo(() => resequenceStops(activeTrip.stops), [activeTrip.stops]);
@@ -406,10 +491,46 @@ function App() {
     if (!stops.length) return 'No stops';
     return `${formatDate(stops[0].date)} - ${formatDate(stops[stops.length - 1].date)}`;
   }, [stops]);
+  const saveBackendLabel =
+    saveBackend === 'database' ? 'DB' : saveBackend === 'local' ? 'Local' : 'Sync';
 
   useEffect(() => {
-    writeStorage(savedTripsKey, savedTrips);
-  }, [savedTrips]);
+    let canceled = false;
+    const localTrips = readSavedTrips();
+
+    fetchSavedTripsFromDatabase()
+      .then(async (databaseTrips) => {
+        const mergedTrips = mergeTripsByFreshness(databaseTrips, localTrips);
+
+        if (localTrips.length) {
+          await Promise.all(mergedTrips.map((trip) => saveTripToDatabase(trip)));
+        }
+
+        if (canceled) return;
+
+        setSavedTrips(mergedTrips);
+        setSaveBackend('database');
+        removeStorage(savedTripsKey);
+        if (localTrips.length) {
+          setSaveMessage('Synced saved trips to database');
+        }
+      })
+      .catch(() => {
+        if (canceled) return;
+
+        setSaveBackend('local');
+      });
+
+    return () => {
+      canceled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (saveBackend === 'local') {
+      writeStorage(savedTripsKey, savedTrips);
+    }
+  }, [saveBackend, savedTrips]);
 
   useEffect(() => {
     writeStorage(activeTripKey, activeTrip);
@@ -521,16 +642,31 @@ function App() {
     touchTrip((trip) => ({ ...trip, stops: resequenceStops(nextStops) }));
   };
 
-  const saveTrip = () => {
+  const saveTrip = async () => {
     const now = new Date().toISOString();
     const tripToSave = normalizeTrip({ ...activeTrip, stops, updatedAt: now }) || activeTrip;
+    const nextSavedTrips = [
+      tripToSave,
+      ...savedTrips.filter((trip) => trip.id !== tripToSave.id),
+    ];
 
     setActiveTrip(tripToSave);
-    setSavedTrips((trips) => [
-      tripToSave,
-      ...trips.filter((trip) => trip.id !== tripToSave.id),
-    ]);
-    setSaveMessage(`Saved ${formatDateTime(now)}`);
+    setSavedTrips(nextSavedTrips);
+    setIsSaving(true);
+
+    try {
+      const savedTrip = await saveTripToDatabase(tripToSave);
+      setSavedTrips((trips) => mergeTripsByFreshness([savedTrip], trips));
+      setSaveBackend('database');
+      removeStorage(savedTripsKey);
+      setSaveMessage(`Saved to database ${formatDateTime(now)}`);
+    } catch {
+      setSaveBackend('local');
+      writeStorage(savedTripsKey, nextSavedTrips);
+      setSaveMessage(`Saved locally ${formatDateTime(now)}`);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const exportActiveTrip = () => {
@@ -557,8 +693,23 @@ function App() {
     setFitSignal((value) => value + 1);
   };
 
-  const removeSavedTrip = (tripId: string) => {
-    setSavedTrips((trips) => trips.filter((trip) => trip.id !== tripId));
+  const removeSavedTrip = async (tripId: string) => {
+    const nextSavedTrips = savedTrips.filter((trip) => trip.id !== tripId);
+    setSavedTrips(nextSavedTrips);
+
+    if (saveBackend !== 'database') {
+      writeStorage(savedTripsKey, nextSavedTrips);
+      return;
+    }
+
+    try {
+      await deleteTripFromDatabase(tripId);
+      removeStorage(savedTripsKey);
+      setSaveMessage('Deleted from database');
+    } catch {
+      setSavedTrips(savedTrips);
+      setSaveMessage('Delete failed');
+    }
   };
 
   const handleRemoteChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -593,9 +744,9 @@ function App() {
           >
             <Download size={18} />
           </button>
-          <button type="button" className="primary-button" onClick={saveTrip}>
+          <button type="button" className="primary-button" onClick={saveTrip} disabled={isSaving}>
             <Save size={18} />
-            <span>Save trip</span>
+            <span>{isSaving ? 'Saving' : 'Save trip'}</span>
           </button>
         </div>
       </header>
@@ -686,7 +837,7 @@ function App() {
           <section className="panel-section saved-section">
             <div className="section-heading">
               <h2>Saved Trips</h2>
-              <span>{savedTrips.length}</span>
+              <span>{`${saveBackendLabel} ${savedTrips.length}`}</span>
             </div>
             {savedTrips.length ? (
               <div className="saved-list">
