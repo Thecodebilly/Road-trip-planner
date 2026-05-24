@@ -2021,7 +2021,7 @@ function MapCanvas({
         mapTypeControl: false,
         fullscreenControl: false,
         clickableIcons: false,
-        gestureHandling: 'cooperative',
+        gestureHandling: 'greedy',
         styles: mapStyles,
         draggableCursor: isPlacingPin ? 'crosshair' : undefined,
       }}

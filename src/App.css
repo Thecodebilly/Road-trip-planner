@@ -747,10 +747,10 @@ textarea:focus {
 }
 
 .map-stop-marker.grouped {
-  min-width: 58px;
-  height: 30px;
-  padding: 0 0.58rem;
-  font-size: 0.68rem;
+  min-width: 42px;
+  height: 26px;
+  padding: 0 0.38rem;
+  font-size: 0.64rem;
 }
 
 .map-stop-marker.remote {
