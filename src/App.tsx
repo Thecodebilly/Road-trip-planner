@@ -22,6 +22,7 @@ import {
   Route,
   Save,
   Trash2,
+  Upload,
   Wifi,
   X,
 } from 'lucide-react';
@@ -96,10 +97,11 @@ const usCenter = { lat: 39.8283, lng: -98.5795 };
 const savedTripsKey = 'road-trip-planner.savedTrips.v1';
 const activeTripKey = 'road-trip-planner.activeTrip.v1';
 const defaultTripId = 'default-2026-usa-itinerary';
+const tripExportFormat = 'road-trip-planner.saved-trip.v1';
 const maxStopsPerDirectionsRequest = 25;
 const exportFormatExample = JSON.stringify(
   {
-    format: 'road-trip-planner.saved-trip.v1',
+    format: tripExportFormat,
     exportedAt: '2026-05-24T00:00:00.000Z',
     trip: {
       id: 'trip-example',
@@ -347,10 +349,20 @@ async function deleteTripFromDatabase(tripId: string) {
 
 function createTripExport(trip: Trip): ExportedTrip {
   return {
-    format: 'road-trip-planner.saved-trip.v1',
+    format: tripExportFormat,
     exportedAt: new Date().toISOString(),
     trip: normalizeTrip(trip) || trip,
   };
+}
+
+function parseTripImport(candidate: unknown) {
+  if (!candidate || typeof candidate !== 'object') return null;
+
+  const exportedTrip = candidate as Partial<ExportedTrip>;
+  if (exportedTrip.format !== tripExportFormat) return null;
+  if (typeof exportedTrip.exportedAt !== 'string') return null;
+
+  return normalizeTrip(exportedTrip.trip);
 }
 
 function sanitizeFileName(value: string) {
@@ -490,6 +502,7 @@ function calculateRoadRouteMiles(routes: RoadRoute[]) {
 
 function App() {
   const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
+  const importInputRef = useRef<HTMLInputElement | null>(null);
   const [savedTrips, setSavedTrips] = useState<Trip[]>(readSavedTrips);
   const [activeTrip, setActiveTrip] = useState<Trip>(() => readActiveTrip() || createDefaultTrip());
   const [selectedStopId, setSelectedStopId] = useState<string | null>(
@@ -499,6 +512,7 @@ function App() {
   const [saveMessage, setSaveMessage] = useState('');
   const [saveBackend, setSaveBackend] = useState<SaveBackend>('checking');
   const [isSaving, setIsSaving] = useState(false);
+  const [isImporting, setIsImporting] = useState(false);
   const [drivingMiles, setDrivingMiles] = useState<number | null>(null);
   const [previewExport, setPreviewExport] = useState<ExportedTrip | null>(null);
   const [previewCopied, setPreviewCopied] = useState(false);
@@ -706,6 +720,51 @@ function App() {
     }
   };
 
+  const importTrip = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = '';
+    if (!file) return;
+
+    setIsImporting(true);
+
+    try {
+      const importedTrip = parseTripImport(JSON.parse(await file.text()));
+      if (!importedTrip) {
+        setSaveMessage('Import needs a saved-trip JSON export');
+        return;
+      }
+
+      const nextSavedTrips = [
+        importedTrip,
+        ...savedTrips.filter((trip) => trip.id !== importedTrip.id),
+      ];
+
+      setActiveTrip(importedTrip);
+      setSelectedStopId(importedTrip.stops[0]?.id || null);
+      setSavedTrips(nextSavedTrips);
+      setFitSignal((value) => value + 1);
+
+      try {
+        const savedTrip = await saveTripToDatabase(importedTrip);
+        setSavedTrips((trips) => [
+          savedTrip,
+          ...trips.filter((trip) => trip.id !== savedTrip.id),
+        ]);
+        setSaveBackend('database');
+        removeStorage(savedTripsKey);
+        setSaveMessage(`Imported to database: ${savedTrip.name}`);
+      } catch {
+        setSaveBackend('local');
+        writeStorage(savedTripsKey, nextSavedTrips);
+        setSaveMessage(`Imported locally: ${importedTrip.name}`);
+      }
+    } catch {
+      setSaveMessage('Import failed: invalid JSON');
+    } finally {
+      setIsImporting(false);
+    }
+  };
+
   const saveTrip = async () => {
     const now = new Date().toISOString();
     const tripToSave = normalizeTrip({ ...activeTrip, stops, updatedAt: now }) || activeTrip;
@@ -796,8 +855,26 @@ function App() {
 
         <div className="topbar-actions" aria-label="Trip actions">
           {saveMessage && <span className="save-status">{saveMessage}</span>}
+          <input
+            ref={importInputRef}
+            className="file-input"
+            type="file"
+            accept="application/json,.json"
+            onChange={importTrip}
+            aria-label="Import trip JSON"
+          />
           <button type="button" className="icon-button" onClick={startNewTrip} title="New trip">
             <FilePlus2 size={18} />
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={() => importInputRef.current?.click()}
+            title="Import trip JSON"
+            aria-label="Import trip JSON"
+            disabled={isImporting}
+          >
+            <Upload size={18} />
           </button>
           <button
             type="button"
@@ -965,7 +1042,7 @@ function App() {
               <h2>Export Format</h2>
               <span>JSON</span>
             </div>
-            <p className="format-copy">Saved trips export as versioned JSON files.</p>
+            <p className="format-copy">Saved trips export and import as versioned JSON files.</p>
             <pre className="format-example" aria-label="Saved trip export JSON example">
               <code>{exportFormatExample}</code>
             </pre>
