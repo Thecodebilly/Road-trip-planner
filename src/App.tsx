@@ -16,6 +16,7 @@ import {
   Eye,
   FilePlus2,
   FolderOpen,
+  Import,
   LocateFixed,
   MapPin,
   Plus,
@@ -667,6 +668,8 @@ function App() {
   const [routeAssistantPrompt, setRouteAssistantPrompt] = useState('');
   const [routeAssistantMessage, setRouteAssistantMessage] = useState('');
   const [isRouteAssistantWorking, setIsRouteAssistantWorking] = useState(false);
+  const [importJsonText, setImportJsonText] = useState('');
+  const [showImportModal, setShowImportModal] = useState(false);
   const [saveBackend, setSaveBackend] = useState<SaveBackend>('checking');
   const [isSaving, setIsSaving] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
@@ -766,6 +769,19 @@ function App() {
     window.addEventListener('keydown', closeOnEscape);
     return () => window.removeEventListener('keydown', closeOnEscape);
   }, [previewExport]);
+
+  useEffect(() => {
+    if (!showImportModal) return undefined;
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setShowImportModal(false);
+      }
+    };
+
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [showImportModal]);
 
   useEffect(() => {
     if (!stops.length) {
@@ -912,15 +928,11 @@ function App() {
     }
   };
 
-  const importTrip = async (event: ChangeEvent<HTMLInputElement>) => {
-    const file = event.currentTarget.files?.[0];
-    event.currentTarget.value = '';
-    if (!file) return;
-
+  const importTripJson = async (jsonText: string, closeModal = false) => {
     setIsImporting(true);
 
     try {
-      const importedTrip = parseTripImport(JSON.parse(await file.text()));
+      const importedTrip = parseTripImport(JSON.parse(jsonText));
       if (!importedTrip) {
         setSaveMessage('Import needs a saved-trip JSON export');
         return;
@@ -937,6 +949,10 @@ function App() {
       setSelectedStopId(importedTrip.stops[0]?.id || null);
       setSavedTrips(nextSavedTrips);
       setFitSignal((value) => value + 1);
+      if (closeModal) {
+        setShowImportModal(false);
+        setImportJsonText('');
+      }
 
       try {
         const savedTrip = await saveTripToDatabase(importedTrip);
@@ -957,6 +973,22 @@ function App() {
     } finally {
       setIsImporting(false);
     }
+  };
+
+  const importTrip = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = '';
+    if (!file) return;
+
+    await importTripJson(await file.text());
+  };
+
+  const importPastedTrip = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const jsonText = importJsonText.trim();
+    if (!jsonText) return;
+
+    await importTripJson(jsonText, true);
   };
 
   const applyRouteAssistant = async (event: FormEvent<HTMLFormElement>) => {
@@ -1133,11 +1165,21 @@ function App() {
             type="button"
             className="icon-button"
             onClick={() => importInputRef.current?.click()}
-            title="Import trip JSON"
-            aria-label="Import trip JSON"
+            title="Import trip JSON file"
+            aria-label="Import trip JSON file"
             disabled={isImporting}
           >
             <Upload size={18} />
+          </button>
+          <button
+            type="button"
+            className="icon-button"
+            onClick={() => setShowImportModal(true)}
+            title="Paste trip JSON"
+            aria-label="Paste trip JSON"
+            disabled={isImporting}
+          >
+            <Import size={18} />
           </button>
           <button
             type="button"
@@ -1526,6 +1568,62 @@ function App() {
                 <span>Download</span>
               </button>
             </footer>
+          </section>
+        </div>
+      )}
+
+      {showImportModal && (
+        <div className="json-modal-backdrop" role="presentation" onClick={() => setShowImportModal(false)}>
+          <section
+            className="json-modal import-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="json-import-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="json-modal-header">
+              <span>
+                <h2 id="json-import-title">Import JSON</h2>
+                <p>Paste a saved trip export.</p>
+              </span>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => setShowImportModal(false)}
+                title="Close import"
+                aria-label="Close import"
+              >
+                <X size={18} />
+              </button>
+            </header>
+            <form className="import-form" onSubmit={importPastedTrip}>
+              <label htmlFor="import-json">Saved trip JSON</label>
+              <textarea
+                id="import-json"
+                value={importJsonText}
+                onChange={(event) => setImportJsonText(event.currentTarget.value)}
+                placeholder={exportFormatExample}
+                rows={14}
+              />
+              <footer className="json-modal-actions">
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => setShowImportModal(false)}
+                >
+                  <X size={17} />
+                  <span>Cancel</span>
+                </button>
+                <button
+                  type="submit"
+                  className="primary-button"
+                  disabled={isImporting || !importJsonText.trim()}
+                >
+                  <Import size={17} />
+                  <span>{isImporting ? 'Importing' : 'Import JSON'}</span>
+                </button>
+              </footer>
+            </form>
           </section>
         </div>
       )}

@@ -649,6 +649,30 @@ textarea:focus {
   flex: 0 1 auto;
 }
 
+.import-modal {
+  width: min(720px, 100%);
+}
+
+.import-form {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 0.65rem;
+  padding: 1rem;
+}
+
+.import-form textarea {
+  min-height: 260px;
+  resize: none;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.import-form .json-modal-actions {
+  margin: 0 -1rem -1rem;
+}
+
 .map-panel {
   min-height: 0;
   position: relative;
@@ -964,5 +988,9 @@ code {
   .json-modal-actions .primary-button,
   .json-modal-actions .secondary-button {
     width: 100%;
+  }
+
+  .import-form textarea {
+    min-height: 220px;
   }
 }
