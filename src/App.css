@@ -1,0 +1,151 @@
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  color: #111827;
+  background-color: #f3f4f6;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.app-layout {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 320px 1fr;
+}
+
+.sidebar {
+  background: #ffffff;
+  border-right: 1px solid #e5e7eb;
+  padding: 1rem;
+  overflow-y: auto;
+}
+
+.sidebar h1 {
+  margin: 0;
+  font-size: 1.2rem;
+}
+
+.subtitle {
+  margin: 0.25rem 0 1rem;
+  color: #6b7280;
+  font-size: 0.9rem;
+}
+
+.sidebar ol {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.stop-button {
+  width: 100%;
+  border: 1px solid #e5e7eb;
+  background: #ffffff;
+  border-radius: 0.75rem;
+  padding: 0.6rem;
+  text-align: left;
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  cursor: pointer;
+}
+
+.stop-button:hover {
+  border-color: #93c5fd;
+  background: #f8fbff;
+}
+
+.stop-button.remote {
+  border-color: #d8b4fe;
+  background: #faf5ff;
+}
+
+.stop-button .order {
+  min-width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #1f6feb;
+  color: #ffffff;
+  font-weight: 700;
+  font-size: 0.85rem;
+}
+
+.stop-button.remote .order {
+  background: #9333ea;
+}
+
+.stop-button small {
+  display: block;
+  margin-top: 0.2rem;
+  color: #6b7280;
+}
+
+.map-panel {
+  min-height: 60vh;
+}
+
+.info-window h2 {
+  margin: 0.25rem 0;
+  font-size: 1rem;
+}
+
+.info-window p {
+  margin: 0;
+}
+
+.remote-badge {
+  margin-top: 0.4rem;
+  display: inline-block;
+  color: #6b21a8;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.state-card {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  padding: 1.5rem;
+}
+
+.state-card.loading {
+  color: #1f2937;
+}
+
+.state-card.error {
+  color: #991b1b;
+}
+
+@media (max-width: 900px) {
+  .app-layout {
+    grid-template-columns: 1fr;
+    grid-template-rows: 320px 1fr;
+  }
+
+  .sidebar {
+    border-right: 0;
+    border-bottom: 1px solid #e5e7eb;
+  }
+
+  .map-panel {
+    min-height: calc(100vh - 320px);
+  }
+}
