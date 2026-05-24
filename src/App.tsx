@@ -498,6 +498,16 @@ function formatDate(date: string) {
   }).format(parsed);
 }
 
+function isWeekendDate(date: string) {
+  if (!date) return false;
+
+  const parsed = new Date(`${date}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) return false;
+
+  const day = parsed.getDay();
+  return day === 0 || day === 6;
+}
+
 function formatDateTime(date: string) {
   const parsed = new Date(date);
   if (Number.isNaN(parsed.getTime())) return 'Just now';
@@ -1827,26 +1837,31 @@ function MapCanvas({
         />
       )}
 
-      {stops.map((stop) => (
-        <MarkerF
-          key={stop.id}
-          position={{ lat: stop.lat, lng: stop.lng }}
-          onClick={() => onSelectStop(stop.id)}
-          label={{
-            text: String(stop.order),
-            color: '#ffffff',
-            fontWeight: '700',
-          }}
-          icon={{
-            path: google.maps.SymbolPath.CIRCLE,
-            fillColor: stop.remoteWork ? '#9f2d55' : '#0f766e',
-            fillOpacity: 1,
-            strokeColor: '#ffffff',
-            strokeWeight: 2,
-            scale: stop.id === selectedStopId ? 13 : 10,
-          }}
-        />
-      ))}
+      {stops.map((stop) => {
+        const isWeekend = isWeekendDate(stop.date);
+
+        return (
+          <MarkerF
+            key={stop.id}
+            position={{ lat: stop.lat, lng: stop.lng }}
+            onClick={() => onSelectStop(stop.id)}
+            title={`${stop.label}${isWeekend ? ' (weekend)' : ''}`}
+            label={{
+              text: String(stop.order),
+              color: '#ffffff',
+              fontWeight: isWeekend ? '900' : '700',
+            }}
+            icon={{
+              path: google.maps.SymbolPath.CIRCLE,
+              fillColor: stop.remoteWork ? '#9f2d55' : '#0f766e',
+              fillOpacity: 1,
+              strokeColor: isWeekend ? '#17202a' : '#ffffff',
+              strokeWeight: isWeekend ? 4 : 2,
+              scale: stop.id === selectedStopId ? (isWeekend ? 15 : 13) : isWeekend ? 12 : 10,
+            }}
+          />
+        );
+      })}
 
       {selectedStop && (
         <InfoWindowF
