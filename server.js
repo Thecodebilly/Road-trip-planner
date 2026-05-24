@@ -13,7 +13,50 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.join(__dirname, 'dist');
 const port = Number(process.env.PORT) || 3000;
 const databaseUrl = process.env.DATABASE_URL;
+const openaiToken = process.env.OPENAI_TOKEN || process.env.OPENAI_API_KEY;
+const openaiModel = process.env.OPENAI_MODEL || 'gpt-5-mini';
 const maxBodyBytes = 2 * 1024 * 1024;
+
+const routeProposalSchema = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['summary', 'trip'],
+  properties: {
+    summary: {
+      type: 'string',
+    },
+    trip: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['id', 'name', 'notes', 'createdAt', 'updatedAt', 'stops'],
+      properties: {
+        id: { type: 'string' },
+        name: { type: 'string' },
+        notes: { type: 'string' },
+        createdAt: { type: 'string' },
+        updatedAt: { type: 'string' },
+        stops: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['id', 'order', 'date', 'label', 'lat', 'lng', 'notes', 'remoteWork'],
+            properties: {
+              id: { type: 'string' },
+              order: { type: 'number' },
+              date: { type: 'string' },
+              label: { type: 'string' },
+              lat: { type: 'number' },
+              lng: { type: 'number' },
+              notes: { type: 'string' },
+              remoteWork: { type: 'boolean' },
+            },
+          },
+        },
+      },
+    },
+  },
+};
 
 const pool = databaseUrl
   ? new Pool({
@@ -93,6 +136,48 @@ function isTrip(value) {
   );
 }
 
+function normalizeTrip(value) {
+  if (!isTrip(value)) return null;
+
+  const now = new Date().toISOString();
+  const stops = value.stops
+    .filter((stop) => stop && typeof stop === 'object' && typeof stop.label === 'string')
+    .map((stop, index) => ({
+      id: typeof stop.id === 'string' && stop.id ? stop.id : `stop-${index + 1}`,
+      order: Number.isFinite(Number(stop.order)) ? Number(stop.order) : index + 1,
+      date: typeof stop.date === 'string' ? stop.date : '',
+      label: stop.label || 'Untitled stop',
+      lat: Number.isFinite(Number(stop.lat)) ? Number(stop.lat) : 39.8283,
+      lng: Number.isFinite(Number(stop.lng)) ? Number(stop.lng) : -98.5795,
+      notes: typeof stop.notes === 'string' ? stop.notes : '',
+      remoteWork: Boolean(stop.remoteWork),
+    }))
+    .filter((stop) => stop.lat >= -90 && stop.lat <= 90 && stop.lng >= -180 && stop.lng <= 180)
+    .sort((a, b) => a.order - b.order)
+    .map((stop, index) => ({ ...stop, order: index + 1 }));
+
+  if (!stops.length) return null;
+
+  return {
+    id: value.id,
+    name: value.name.trim() || 'Untitled trip',
+    notes: typeof value.notes === 'string' ? value.notes : '',
+    stops,
+    createdAt: typeof value.createdAt === 'string' ? value.createdAt : now,
+    updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : now,
+  };
+}
+
+function extractOpenAIText(payload) {
+  if (typeof payload?.output_text === 'string') return payload.output_text;
+
+  return (payload?.output || [])
+    .flatMap((item) => item?.content || [])
+    .filter((content) => content?.type === 'output_text' && typeof content.text === 'string')
+    .map((content) => content.text)
+    .join('\n');
+}
+
 function readJsonBody(request) {
   return new Promise((resolve, reject) => {
     let bytes = 0;
@@ -122,6 +207,84 @@ function readJsonBody(request) {
 }
 
 async function handleApi(request, response, url) {
+  if (request.method === 'POST' && url.pathname === '/api/route-assistant') {
+    if (!openaiToken) {
+      sendJson(response, 503, { error: 'OPENAI_NOT_CONFIGURED' });
+      return;
+    }
+
+    const body = await readJsonBody(request);
+    const instruction = typeof body.instruction === 'string' ? body.instruction.trim() : '';
+    const trip = normalizeTrip(body.trip);
+
+    if (!instruction || instruction.length > 1600 || !trip) {
+      sendJson(response, 400, { error: 'INVALID_ROUTE_ASSISTANT_REQUEST' });
+      return;
+    }
+
+    const openaiResponse = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${openaiToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: openaiModel,
+        instructions: [
+          'You are a route-planning assistant for a road-trip planner.',
+          'Return only the requested structured JSON.',
+          'Revise the supplied trip according to the user request. You may add, remove, reorder, rename, or adjust stops.',
+          'Preserve useful existing dates, notes, remoteWork flags, and stops unless the user asks to change them.',
+          'Use approximate latitude and longitude for well-known places when adding stops.',
+          'Every stop must have order starting at 1, a human-readable label, numeric lat/lng, notes, date, and remoteWork.',
+          'Keep dates as YYYY-MM-DD strings when dates are known; otherwise use an empty string.',
+          'Do not save anything. This is only a proposed draft trip for the user to review.',
+        ].join(' '),
+        input: JSON.stringify({
+          instruction,
+          trip,
+        }),
+        max_output_tokens: 12000,
+        text: {
+          format: {
+            type: 'json_schema',
+            name: 'route_trip_proposal',
+            strict: true,
+            schema: routeProposalSchema,
+          },
+        },
+      }),
+    });
+
+    if (!openaiResponse.ok) {
+      const errorText = await openaiResponse.text();
+      console.error('OpenAI route assistant failed:', errorText);
+      sendJson(response, 502, { error: 'OPENAI_REQUEST_FAILED' });
+      return;
+    }
+
+    const payload = await openaiResponse.json();
+    const outputText = extractOpenAIText(payload);
+    let proposal = null;
+    try {
+      proposal = outputText ? JSON.parse(outputText) : null;
+    } catch {
+      proposal = null;
+    }
+    const proposedTrip = normalizeTrip(proposal?.trip);
+
+    if (!proposal || typeof proposal.summary !== 'string' || !proposedTrip) {
+      sendJson(response, 502, { error: 'INVALID_OPENAI_RESPONSE' });
+      return;
+    }
+
+    sendJson(response, 200, {
+      summary: proposal.summary,
+      trip: proposedTrip,
+    });
+    return;
+  }
+
   if (request.method === 'GET' && url.pathname === '/api/trips') {
     if (!(await requireDatabase(response))) return;
 

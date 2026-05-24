@@ -34,11 +34,56 @@ button {
 .app-shell {
   height: 100vh;
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   overflow: hidden;
   background:
     linear-gradient(180deg, rgba(15, 118, 110, 0.07), rgba(246, 248, 251, 0) 34%),
     #f6f8fb;
+}
+
+.route-assistant-bar {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.65rem 1rem;
+  border-bottom: 1px solid #dfe5ec;
+  background: #f9fbfc;
+}
+
+.route-assistant-icon {
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  color: #115e59;
+  background: #ecf7f4;
+}
+
+.route-assistant-form {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(240px, 1fr) auto;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+.route-assistant-form label {
+  white-space: nowrap;
+}
+
+.route-assistant-message {
+  max-width: 26rem;
+  margin: 0;
+  overflow: hidden;
+  color: #47615d;
+  font-size: 0.84rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .topbar {
@@ -823,6 +868,23 @@ code {
     height: auto;
     min-height: auto;
     overflow: visible;
+  }
+
+  .route-assistant-bar {
+    grid-template-columns: 1fr;
+  }
+
+  .route-assistant-icon {
+    display: none;
+  }
+
+  .route-assistant-form {
+    grid-template-columns: 1fr;
+  }
+
+  .route-assistant-message {
+    max-width: none;
+    white-space: normal;
   }
 
   .topbar {

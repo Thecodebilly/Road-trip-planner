@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { ChangeEvent } from 'react';
+import type { ChangeEvent, FormEvent } from 'react';
 import {
   GoogleMap,
   InfoWindowF,
@@ -21,6 +21,7 @@ import {
   Plus,
   Route,
   Save,
+  Sparkles,
   Trash2,
   Upload,
   Wifi,
@@ -66,6 +67,11 @@ type ExportedTrip = {
 };
 
 type SaveBackend = 'checking' | 'database' | 'local';
+
+type RouteAssistantResult = {
+  summary: string;
+  trip: Trip;
+};
 
 type RoadRoute = {
   distanceMeters?: number;
@@ -377,6 +383,32 @@ async function deleteTripFromDatabase(tripId: string) {
   }
 }
 
+async function requestRouteAssistant(trip: Trip, instruction: string): Promise<RouteAssistantResult> {
+  const response = await fetch('/api/route-assistant', {
+    method: 'POST',
+    headers: {
+      accept: 'application/json',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ trip, instruction }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`ROUTE_ASSISTANT_${response.status}`);
+  }
+
+  const result = await response.json();
+  const proposedTrip = normalizeTrip(result.trip);
+  if (!proposedTrip || typeof result.summary !== 'string') {
+    throw new Error('INVALID_ROUTE_ASSISTANT_RESPONSE');
+  }
+
+  return {
+    summary: result.summary,
+    trip: proposedTrip,
+  };
+}
+
 function createTripExport(trip: Trip): ExportedTrip {
   return {
     format: tripExportFormat,
@@ -632,6 +664,9 @@ function App() {
   );
   const [fitSignal, setFitSignal] = useState(0);
   const [saveMessage, setSaveMessage] = useState('');
+  const [routeAssistantPrompt, setRouteAssistantPrompt] = useState('');
+  const [routeAssistantMessage, setRouteAssistantMessage] = useState('');
+  const [isRouteAssistantWorking, setIsRouteAssistantWorking] = useState(false);
   const [saveBackend, setSaveBackend] = useState<SaveBackend>('checking');
   const [isSaving, setIsSaving] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
@@ -924,6 +959,47 @@ function App() {
     }
   };
 
+  const applyRouteAssistant = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const instruction = routeAssistantPrompt.trim();
+    if (!instruction) return;
+
+    setIsRouteAssistantWorking(true);
+    setRouteAssistantMessage('Thinking through route changes...');
+
+    try {
+      const result = await requestRouteAssistant(getActiveTripForExport(), instruction);
+      const now = new Date().toISOString();
+      const proposedTrip = normalizeTrip({
+        ...result.trip,
+        id: makeId('trip'),
+        createdAt: now,
+        updatedAt: now,
+        name: result.trip.name || `${activeTrip.name} AI draft`,
+      });
+
+      if (!proposedTrip) {
+        throw new Error('INVALID_ROUTE_ASSISTANT_RESPONSE');
+      }
+
+      setDrivingMiles(null);
+      setRoadDriveEstimates(null);
+      setActiveTrip(proposedTrip);
+      setSelectedStopId(proposedTrip.stops[0]?.id || null);
+      setFitSignal((value) => value + 1);
+      setRouteAssistantPrompt('');
+      setRouteAssistantMessage(`${result.summary} Save the draft when ready.`);
+      setSaveMessage('AI route draft loaded');
+    } catch (error) {
+      const message = error instanceof Error && error.message.includes('503')
+        ? 'AI route editor needs OPENAI_TOKEN on the server.'
+        : 'AI route edit failed. Try a smaller change.';
+      setRouteAssistantMessage(message);
+    } finally {
+      setIsRouteAssistantWorking(false);
+    }
+  };
+
   const saveTrip = async () => {
     const now = new Date().toISOString();
     const tripToSave = normalizeTrip({ ...activeTrip, stops, updatedAt: now }) || activeTrip;
@@ -1005,6 +1081,30 @@ function App() {
 
   return (
     <div className="app-shell">
+      <section className="route-assistant-bar" aria-label="AI route editor">
+        <span className="route-assistant-icon" aria-hidden="true">
+          <Sparkles size={18} />
+        </span>
+        <form className="route-assistant-form" onSubmit={applyRouteAssistant}>
+          <label htmlFor="route-assistant-prompt">AI route edit</label>
+          <input
+            id="route-assistant-prompt"
+            value={routeAssistantPrompt}
+            onChange={(event) => setRouteAssistantPrompt(event.currentTarget.value)}
+            placeholder="Add a night in Denver, skip toll roads, or make the route more coastal"
+          />
+          <button
+            type="submit"
+            className="primary-button"
+            disabled={isRouteAssistantWorking || !routeAssistantPrompt.trim()}
+          >
+            <Sparkles size={17} />
+            <span>{isRouteAssistantWorking ? 'Working' : 'Update route'}</span>
+          </button>
+        </form>
+        {routeAssistantMessage && <p className="route-assistant-message">{routeAssistantMessage}</p>}
+      </section>
+
       <header className="topbar">
         <div className="brand">
           <span className="brand-mark" aria-hidden="true">

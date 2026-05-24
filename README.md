@@ -20,7 +20,12 @@ A small React + TypeScript + Vite web app that visualizes a USA road trip itiner
    ```env
    DATABASE_URL=postgresql://user:password@host:5432/database
    ```
-5. Start the frontend dev server:
+5. Optionally add OpenAI credentials for the AI route editor:
+   ```env
+   OPENAI_TOKEN=your_openai_api_token_here
+   OPENAI_MODEL=gpt-5-mini
+   ```
+6. Start the frontend dev server:
    ```bash
    npm run dev
    ```
@@ -37,6 +42,8 @@ npm start
 2. In Railway project variables, add:
    - `VITE_GOOGLE_MAPS_API_KEY` with your real API key.
    - `DATABASE_URL` from a Railway Postgres database, or another Postgres provider.
+   - `OPENAI_TOKEN` for the AI route editor.
+   - `OPENAI_MODEL` if you want to override the default `gpt-5-mini`.
 3. Railway will build and run using:
    - Build: `npm run build`
    - Start: `npm run start`
