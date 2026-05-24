@@ -52,6 +52,12 @@ type DriveEstimate = {
   source: 'road' | 'estimated';
 };
 
+type MapStop = TripStop & {
+  markerLat: number;
+  markerLng: number;
+  markerStackSize: number;
+};
+
 type Trip = {
   id: string;
   name: string;
@@ -631,6 +637,40 @@ function formatDriveSummary(estimate: DriveEstimate, gasPrice: number, fuelMpg: 
   return `${prefix}${Math.round(estimate.distanceMiles).toLocaleString()} mi | ${formatDriveDuration(
     estimate.durationMinutes,
   )} | ${formatGasCost(estimate.distanceMiles, gasPrice, fuelMpg)} gas`;
+}
+
+function spreadOverlappingStops(stops: TripStop[]): MapStop[] {
+  const groups = new Map<string, TripStop[]>();
+
+  stops.forEach((stop) => {
+    const key = `${stop.lat.toFixed(5)},${stop.lng.toFixed(5)}`;
+    groups.set(key, [...(groups.get(key) || []), stop]);
+  });
+
+  return stops.map((stop) => {
+    const key = `${stop.lat.toFixed(5)},${stop.lng.toFixed(5)}`;
+    const group = groups.get(key) || [stop];
+    const stackIndex = group.findIndex((groupedStop) => groupedStop.id === stop.id);
+
+    if (group.length === 1 || stackIndex < 0) {
+      return {
+        ...stop,
+        markerLat: stop.lat,
+        markerLng: stop.lng,
+        markerStackSize: group.length,
+      };
+    }
+
+    const angle = (Math.PI * 2 * stackIndex) / group.length - Math.PI / 2;
+    const radius = 0.018 + Math.min(group.length, 5) * 0.003;
+
+    return {
+      ...stop,
+      markerLat: stop.lat + Math.sin(angle) * radius,
+      markerLng: stop.lng + Math.cos(angle) * radius,
+      markerStackSize: group.length,
+    };
+  });
 }
 
 function splitStopsForDirections(stops: TripStop[]) {
@@ -1673,6 +1713,11 @@ function MapCanvas({
     () => stops.find((stop) => stop.id === selectedStopId) || null,
     [selectedStopId, stops],
   );
+  const mapStops = useMemo(() => spreadOverlappingStops(stops), [stops]);
+  const selectedMapStop = useMemo(
+    () => mapStops.find((stop) => stop.id === selectedStopId) || null,
+    [mapStops, selectedStopId],
+  );
   const path = useMemo(() => stops.map((stop) => ({ lat: stop.lat, lng: stop.lng })), [stops]);
   const directionsKey = useMemo(
     () => stops.map((stop) => `${stop.id}:${stop.order}:${stop.lat.toFixed(5)},${stop.lng.toFixed(5)}`).join('|'),
@@ -1837,15 +1882,17 @@ function MapCanvas({
         />
       )}
 
-      {stops.map((stop) => {
+      {mapStops.map((stop) => {
         const isWeekend = isWeekendDate(stop.date);
 
         return (
           <MarkerF
             key={stop.id}
-            position={{ lat: stop.lat, lng: stop.lng }}
+            position={{ lat: stop.markerLat, lng: stop.markerLng }}
             onClick={() => onSelectStop(stop.id)}
-            title={`${stop.label}${isWeekend ? ' (weekend)' : ''}`}
+            title={`${stop.label}${isWeekend ? ' (weekend)' : ''}${
+              stop.markerStackSize > 1 ? ' (offset from overlapping stop)' : ''
+            }`}
             label={{
               text: String(stop.order),
               color: '#ffffff',
@@ -1866,7 +1913,10 @@ function MapCanvas({
 
       {selectedStop && (
         <InfoWindowF
-          position={{ lat: selectedStop.lat, lng: selectedStop.lng }}
+          position={{
+            lat: selectedMapStop?.markerLat || selectedStop.lat,
+            lng: selectedMapStop?.markerLng || selectedStop.lng,
+          }}
           onCloseClick={() => onSelectStop(null)}
         >
           <div className="info-window">
