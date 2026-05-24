@@ -650,7 +650,7 @@ code {
 
   .map-panel {
     min-height: 58vh;
-    order: 2;
+    order: 1;
   }
 
   .detail-panel {
@@ -659,7 +659,7 @@ code {
   }
 
   .left-panel {
-    order: 1;
+    order: 2;
     border-bottom: 1px solid #dfe5ec;
   }
 
