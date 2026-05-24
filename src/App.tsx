@@ -93,7 +93,6 @@ type RoadRoute = {
     distanceMeters?: number;
     durationMillis?: number;
   }>;
-  warnings?: string[];
   createPolylines: (options?: {
     polylineOptions?: google.maps.PolylineOptions | ((options: google.maps.PolylineOptions) => google.maps.PolylineOptions);
   }) => google.maps.Polyline[];
@@ -746,7 +745,7 @@ async function requestRoadRoute(routeLibrary: RoadRoutesLibrary, stops: TripStop
     intermediates,
     travelMode: 'DRIVING',
     routingPreference: 'TRAFFIC_UNAWARE',
-    fields: ['path', 'distanceMeters', 'durationMillis', 'legs', 'warnings'],
+    fields: ['path', 'distanceMeters', 'durationMillis', 'legs'],
   });
 
   const route = response.routes?.[0];
@@ -1850,7 +1849,6 @@ function MapCanvas({
   const mapRef = useRef<google.maps.Map | null>(null);
   const routePolylinesRef = useRef<google.maps.Polyline[]>([]);
   const [mapInstance, setMapInstance] = useState<google.maps.Map | null>(null);
-  const [routeWarnings, setRouteWarnings] = useState<string[]>([]);
   const [routeStatus, setRouteStatus] = useState<'idle' | 'loading' | 'ready' | 'fallback'>('idle');
   const [routeError, setRouteError] = useState('');
   const [routeNoticeDismissed, setRouteNoticeDismissed] = useState(false);
@@ -1902,7 +1900,6 @@ function MapCanvas({
       clearRoutePolylines();
       setRouteStatus('idle');
       setRouteError('');
-      setRouteWarnings([]);
       setRouteNoticeDismissed(false);
       onRouteDistanceChange(null);
       onDriveEstimatesChange(null);
@@ -1913,7 +1910,6 @@ function MapCanvas({
     clearRoutePolylines();
     setRouteStatus('loading');
     setRouteError('');
-    setRouteWarnings([]);
     setRouteNoticeDismissed(false);
     onRouteDistanceChange(null);
     onDriveEstimatesChange(null);
@@ -1947,7 +1943,6 @@ function MapCanvas({
           routePolylinesRef.current = polylines;
           setRouteStatus('ready');
           setRouteError('');
-          setRouteWarnings(routes.flatMap((route) => route.warnings || []));
           setRouteNoticeDismissed(false);
           onRouteDistanceChange(calculateRoadRouteMiles(routes));
           onDriveEstimatesChange(buildRoadDriveEstimates(routes, stops));
@@ -1958,7 +1953,6 @@ function MapCanvas({
           clearRoutePolylines();
           setRouteStatus('fallback');
           setRouteError(error.message);
-          setRouteWarnings([]);
           setRouteNoticeDismissed(false);
           onRouteDistanceChange(null);
           onDriveEstimatesChange(null);
@@ -2130,20 +2124,6 @@ function MapCanvas({
     {routeStatus === 'fallback' && !routeNoticeDismissed && (
       <div className="route-status warning">
         <span>Driving route unavailable{routeError ? ` (${routeError})` : ''}; showing estimated path.</span>
-        <button
-          type="button"
-          className="route-status-close"
-          onClick={() => setRouteNoticeDismissed(true)}
-          title="Dismiss route notice"
-          aria-label="Dismiss route notice"
-        >
-          <X size={14} />
-        </button>
-      </div>
-    )}
-    {routeStatus === 'ready' && routeWarnings.length > 0 && !routeNoticeDismissed && (
-      <div className="route-status warning">
-        <span>{routeWarnings.join(' ')}</span>
         <button
           type="button"
           className="route-status-close"
