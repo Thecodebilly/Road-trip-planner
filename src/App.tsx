@@ -421,6 +421,18 @@ function createTripExport(trip: Trip): ExportedTrip {
 function parseTripImport(candidate: unknown) {
   if (!candidate || typeof candidate !== 'object') return null;
 
+  if (Array.isArray(candidate)) {
+    const now = new Date().toISOString();
+    return normalizeTrip({
+      id: makeId('trip'),
+      name: 'Imported itinerary',
+      notes: 'Imported from a raw stop list.',
+      stops: candidate,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
   const exportedTrip = candidate as Partial<ExportedTrip>;
   if (exportedTrip.format !== tripExportFormat) return null;
   if (typeof exportedTrip.exportedAt !== 'string') return null;
@@ -934,7 +946,7 @@ function App() {
     try {
       const importedTrip = parseTripImport(JSON.parse(jsonText));
       if (!importedTrip) {
-        setSaveMessage('Import needs a saved-trip JSON export');
+        setSaveMessage('Import needs a saved-trip export or stop list');
         return;
       }
 
