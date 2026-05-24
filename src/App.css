@@ -191,7 +191,7 @@ textarea:focus {
 
 .metric-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(92px, 1fr));
   gap: 0.5rem;
   margin-top: 0.25rem;
 }
@@ -219,6 +219,18 @@ textarea:focus {
   margin-top: 0.2rem;
   color: #667085;
   font-size: 0.76rem;
+}
+
+.fuel-settings {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.55rem;
+}
+
+.fuel-settings span {
+  min-width: 0;
+  display: grid;
+  gap: 0.3rem;
 }
 
 .rail-actions {
@@ -408,6 +420,14 @@ textarea:focus {
   gap: 0.3rem;
   color: #667085;
   font-size: 0.8rem;
+}
+
+.stop-copy .drive-summary {
+  flex-wrap: wrap;
+  color: #115e59;
+  font-weight: 800;
+  line-height: 1.25;
+  white-space: normal;
 }
 
 .mini-badge {
@@ -833,7 +853,8 @@ code {
 }
 
 @media (max-width: 520px) {
-  .metric-grid {
+  .metric-grid,
+  .fuel-settings {
     grid-template-columns: 1fr;
   }
 

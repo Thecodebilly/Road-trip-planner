@@ -42,6 +42,14 @@ type TripStop = ImportedTripStop & {
   id: string;
 };
 
+type DriveEstimate = {
+  fromStopId: string;
+  toStopId: string;
+  distanceMiles: number;
+  durationMinutes: number;
+  source: 'road' | 'estimated';
+};
+
 type Trip = {
   id: string;
   name: string;
@@ -61,6 +69,11 @@ type SaveBackend = 'checking' | 'database' | 'local';
 
 type RoadRoute = {
   distanceMeters?: number;
+  durationMillis?: number;
+  legs?: Array<{
+    distanceMeters?: number;
+    durationMillis?: number;
+  }>;
   warnings?: string[];
   createPolylines: (options?: {
     polylineOptions?: google.maps.PolylineOptions | ((options: google.maps.PolylineOptions) => google.maps.PolylineOptions);
@@ -90,15 +103,21 @@ type MapCanvasProps = {
   fitSignal: number;
   onSelectStop: (stopId: string | null) => void;
   onRouteDistanceChange: (miles: number | null) => void;
+  onDriveEstimatesChange: (estimates: DriveEstimate[] | null) => void;
 };
 
 const mapContainerStyle = { width: '100%', height: '100%' };
 const usCenter = { lat: 39.8283, lng: -98.5795 };
 const savedTripsKey = 'road-trip-planner.savedTrips.v1';
 const activeTripKey = 'road-trip-planner.activeTrip.v1';
+const gasPriceKey = 'road-trip-planner.gasPrice.v1';
+const fuelMpgKey = 'road-trip-planner.fuelMpg.v1';
 const defaultTripId = 'default-2026-usa-itinerary';
 const tripExportFormat = 'road-trip-planner.saved-trip.v1';
 const maxStopsPerDirectionsRequest = 25;
+const defaultGasPrice = 3.5;
+const defaultFuelMpg = 25;
+const estimatedAverageMph = 55;
 const exportFormatExample = JSON.stringify(
   {
     format: tripExportFormat,
@@ -263,6 +282,17 @@ function writeStorage(key: string, value: unknown) {
     window.localStorage.setItem(key, JSON.stringify(value));
   } catch {
     // localStorage can be unavailable in private browsing or locked-down embeds.
+  }
+}
+
+function readNumberStorage(key: string, fallback: number, minimum = 0) {
+  try {
+    const saved = window.localStorage.getItem(key);
+    const parsed = saved ? Number(JSON.parse(saved)) : fallback;
+
+    return Number.isFinite(parsed) && parsed >= minimum ? parsed : fallback;
+  } catch {
+    return fallback;
   }
 }
 
@@ -435,25 +465,117 @@ function formatDateTime(date: string) {
   }).format(parsed);
 }
 
-function calculateMiles(stops: TripStop[]) {
+function calculateSegmentMiles(previous: TripStop, next: TripStop) {
   const earthRadiusMiles = 3958.8;
-  let miles = 0;
+  const dLat = ((next.lat - previous.lat) * Math.PI) / 180;
+  const dLng = ((next.lng - previous.lng) * Math.PI) / 180;
+  const lat1 = (previous.lat * Math.PI) / 180;
+  const lat2 = (next.lat * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.sin(dLng / 2) ** 2 * Math.cos(lat1) * Math.cos(lat2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  return earthRadiusMiles * c;
+}
+
+function metersToMiles(meters: number) {
+  return meters / 1609.344;
+}
+
+function estimateDriveMinutes(miles: number) {
+  return Math.max(1, Math.round((miles / estimatedAverageMph) * 60));
+}
+
+function millisToMinutes(milliseconds: number | undefined, fallbackMiles: number) {
+  if (!milliseconds || !Number.isFinite(milliseconds)) return estimateDriveMinutes(fallbackMiles);
+
+  return Math.max(1, Math.round(milliseconds / 60000));
+}
+
+function buildEstimatedDriveEstimates(stops: TripStop[]): DriveEstimate[] {
+  const estimates: DriveEstimate[] = [];
 
   for (let index = 1; index < stops.length; index += 1) {
     const previous = stops[index - 1];
     const next = stops[index];
-    const dLat = ((next.lat - previous.lat) * Math.PI) / 180;
-    const dLng = ((next.lng - previous.lng) * Math.PI) / 180;
-    const lat1 = (previous.lat * Math.PI) / 180;
-    const lat2 = (next.lat * Math.PI) / 180;
-    const a =
-      Math.sin(dLat / 2) ** 2 +
-      Math.sin(dLng / 2) ** 2 * Math.cos(lat1) * Math.cos(lat2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    miles += earthRadiusMiles * c;
+    const distanceMiles = calculateSegmentMiles(previous, next);
+
+    estimates.push({
+      fromStopId: previous.id,
+      toStopId: next.id,
+      distanceMiles,
+      durationMinutes: estimateDriveMinutes(distanceMiles),
+      source: 'estimated',
+    });
   }
 
-  return Math.round(miles);
+  return estimates;
+}
+
+function buildRoadDriveEstimates(routes: RoadRoute[], stops: TripStop[]) {
+  const chunks = splitStopsForDirections(stops);
+  const estimates: DriveEstimate[] = [];
+
+  chunks.forEach((chunk, chunkIndex) => {
+    const route = routes[chunkIndex];
+
+    for (let legIndex = 1; legIndex < chunk.length; legIndex += 1) {
+      const previous = chunk[legIndex - 1];
+      const next = chunk[legIndex];
+      const fallbackMiles = calculateSegmentMiles(previous, next);
+      const leg = route?.legs?.[legIndex - 1];
+      const distanceMiles = leg?.distanceMeters ? metersToMiles(leg.distanceMeters) : fallbackMiles;
+
+      estimates.push({
+        fromStopId: previous.id,
+        toStopId: next.id,
+        distanceMiles,
+        durationMinutes: millisToMinutes(leg?.durationMillis, distanceMiles),
+        source: leg?.distanceMeters ? 'road' : 'estimated',
+      });
+    }
+  });
+
+  return estimates;
+}
+
+function sumDriveMiles(estimates: DriveEstimate[]) {
+  return Math.round(estimates.reduce((total, estimate) => total + estimate.distanceMiles, 0));
+}
+
+function sumDriveMinutes(estimates: DriveEstimate[]) {
+  return estimates.reduce((total, estimate) => total + estimate.durationMinutes, 0);
+}
+
+function calculateGasCost(miles: number, gasPrice: number, fuelMpg: number) {
+  if (fuelMpg <= 0) return 0;
+
+  return (miles / fuelMpg) * gasPrice;
+}
+
+function formatGasCost(miles: number, gasPrice: number, fuelMpg: number) {
+  return new Intl.NumberFormat('en-US', {
+    style: 'currency',
+    currency: 'USD',
+    maximumFractionDigits: 0,
+  }).format(calculateGasCost(miles, gasPrice, fuelMpg));
+}
+
+function formatDriveDuration(minutes: number) {
+  if (minutes < 60) return `${minutes}m`;
+
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+
+  return remainingMinutes ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+}
+
+function formatDriveSummary(estimate: DriveEstimate, gasPrice: number, fuelMpg: number) {
+  const prefix = estimate.source === 'road' ? '' : 'Est. ';
+  return `${prefix}${Math.round(estimate.distanceMiles).toLocaleString()} mi | ${formatDriveDuration(
+    estimate.durationMinutes,
+  )} | ${formatGasCost(estimate.distanceMiles, gasPrice, fuelMpg)} gas`;
 }
 
 function splitStopsForDirections(stops: TripStop[]) {
@@ -483,7 +605,7 @@ async function requestRoadRoute(routeLibrary: RoadRoutesLibrary, stops: TripStop
     intermediates,
     travelMode: 'DRIVING',
     routingPreference: 'TRAFFIC_UNAWARE',
-    fields: ['path', 'distanceMeters', 'warnings'],
+    fields: ['path', 'distanceMeters', 'durationMillis', 'legs', 'warnings'],
   });
 
   const route = response.routes?.[0];
@@ -497,7 +619,7 @@ async function requestRoadRoute(routeLibrary: RoadRoutesLibrary, stops: TripStop
 function calculateRoadRouteMiles(routes: RoadRoute[]) {
   const meters = routes.reduce((total, route) => total + (route.distanceMeters || 0), 0);
 
-  return meters > 0 ? Math.round(meters / 1609.344) : null;
+  return meters > 0 ? Math.round(metersToMiles(meters)) : null;
 }
 
 function App() {
@@ -514,6 +636,9 @@ function App() {
   const [isSaving, setIsSaving] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [drivingMiles, setDrivingMiles] = useState<number | null>(null);
+  const [roadDriveEstimates, setRoadDriveEstimates] = useState<DriveEstimate[] | null>(null);
+  const [gasPrice, setGasPrice] = useState(() => readNumberStorage(gasPriceKey, defaultGasPrice));
+  const [fuelMpg, setFuelMpg] = useState(() => readNumberStorage(fuelMpgKey, defaultFuelMpg, 0.01));
   const [previewExport, setPreviewExport] = useState<ExportedTrip | null>(null);
   const [previewCopied, setPreviewCopied] = useState(false);
 
@@ -522,8 +647,16 @@ function App() {
     () => stops.find((stop) => stop.id === selectedStopId) || null,
     [selectedStopId, stops],
   );
-  const routeMiles = useMemo(() => calculateMiles(stops), [stops]);
-  const displayMiles = drivingMiles ?? routeMiles;
+  const estimatedDriveEstimates = useMemo(() => buildEstimatedDriveEstimates(stops), [stops]);
+  const driveEstimates = roadDriveEstimates || estimatedDriveEstimates;
+  const driveEstimateByStopId = useMemo(
+    () => new Map(driveEstimates.map((estimate) => [estimate.toStopId, estimate])),
+    [driveEstimates],
+  );
+  const hasRoadDriveEstimates = Boolean(roadDriveEstimates?.some((estimate) => estimate.source === 'road'));
+  const displayMiles = drivingMiles ?? sumDriveMiles(estimatedDriveEstimates);
+  const displayDriveMinutes = sumDriveMinutes(driveEstimates);
+  const displayGasCost = formatGasCost(displayMiles, gasPrice, fuelMpg);
   const remoteStops = useMemo(() => stops.filter((stop) => stop.remoteWork).length, [stops]);
   const dateRange = useMemo(() => {
     if (!stops.length) return 'No stops';
@@ -575,6 +708,14 @@ function App() {
   }, [saveBackend, savedTrips]);
 
   useEffect(() => {
+    writeStorage(gasPriceKey, gasPrice);
+  }, [gasPrice]);
+
+  useEffect(() => {
+    writeStorage(fuelMpgKey, fuelMpg);
+  }, [fuelMpg]);
+
+  useEffect(() => {
     writeStorage(activeTripKey, activeTrip);
   }, [activeTrip]);
 
@@ -603,6 +744,8 @@ function App() {
   }, [selectedStopId, stops]);
 
   const touchTrip = (updater: (trip: Trip) => Trip) => {
+    setDrivingMiles(null);
+    setRoadDriveEstimates(null);
     setActiveTrip((trip) => ({
       ...updater(trip),
       updatedAt: new Date().toISOString(),
@@ -627,6 +770,20 @@ function App() {
     const nextValue = Number(value);
     if (!Number.isFinite(nextValue)) return;
     updateStop(stopId, { [field]: nextValue });
+  };
+
+  const updateGasPrice = (value: string) => {
+    const nextValue = Number(value);
+    if (!Number.isFinite(nextValue) || nextValue < 0) return;
+
+    setGasPrice(nextValue);
+  };
+
+  const updateFuelMpg = (value: string) => {
+    const nextValue = Number(value);
+    if (!Number.isFinite(nextValue) || nextValue <= 0) return;
+
+    setFuelMpg(nextValue);
   };
 
   const addStop = () => {
@@ -739,6 +896,8 @@ function App() {
         ...savedTrips.filter((trip) => trip.id !== importedTrip.id),
       ];
 
+      setDrivingMiles(null);
+      setRoadDriveEstimates(null);
       setActiveTrip(importedTrip);
       setSelectedStopId(importedTrip.stops[0]?.id || null);
       setSavedTrips(nextSavedTrips);
@@ -800,6 +959,8 @@ function App() {
 
   const startNewTrip = () => {
     const newTrip = createBlankTrip();
+    setDrivingMiles(null);
+    setRoadDriveEstimates(null);
     setActiveTrip(newTrip);
     setSelectedStopId(newTrip.stops[0].id);
     setSaveMessage('');
@@ -810,6 +971,8 @@ function App() {
     const nextTrip = normalizeTrip(trip);
     if (!nextTrip) return;
 
+    setDrivingMiles(null);
+    setRoadDriveEstimates(null);
     setActiveTrip(nextTrip);
     setSelectedStopId(nextTrip.stops[0]?.id || null);
     setSaveMessage(`Loaded ${nextTrip.name}`);
@@ -929,9 +1092,42 @@ function App() {
                 <span>{drivingMiles === null ? 'Est. miles' : 'Drive mi'}</span>
               </div>
               <div>
+                <strong>{formatDriveDuration(displayDriveMinutes)}</strong>
+                <span>{hasRoadDriveEstimates ? 'Drive time' : 'Est. time'}</span>
+              </div>
+              <div>
+                <strong>{displayGasCost}</strong>
+                <span>Est. gas</span>
+              </div>
+              <div>
                 <strong>{remoteStops}</strong>
                 <span>Remote</span>
               </div>
+            </div>
+
+            <div className="fuel-settings" aria-label="Fuel assumptions">
+              <span>
+                <label htmlFor="gas-price">Gas $/gal</label>
+                <input
+                  id="gas-price"
+                  type="number"
+                  min="0"
+                  step="0.05"
+                  value={gasPrice}
+                  onChange={(event) => updateGasPrice(event.currentTarget.value)}
+                />
+              </span>
+              <span>
+                <label htmlFor="fuel-mpg">MPG</label>
+                <input
+                  id="fuel-mpg"
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={fuelMpg}
+                  onChange={(event) => updateFuelMpg(event.currentTarget.value)}
+                />
+              </span>
             </div>
 
             <div className="rail-actions">
@@ -956,31 +1152,41 @@ function App() {
               <span>{stops.length}</span>
             </div>
             <ol className="stop-list">
-              {stops.map((stop) => (
-                <li key={stop.id}>
-                  <button
-                    type="button"
-                    className={`stop-card ${stop.id === selectedStopId ? 'selected' : ''}`}
-                    onClick={() => setSelectedStopId(stop.id)}
-                  >
-                    <span className={stop.remoteWork ? 'stop-index remote' : 'stop-index'}>
-                      {stop.order}
-                    </span>
-                    <span className="stop-copy">
-                      <strong>{stop.label}</strong>
-                      <small>
-                        <CalendarDays size={14} />
-                        {formatDate(stop.date)}
-                      </small>
-                    </span>
-                    {stop.remoteWork && (
-                      <span className="mini-badge" title="Remote-work stop">
-                        <Wifi size={14} />
+              {stops.map((stop) => {
+                const driveEstimate = driveEstimateByStopId.get(stop.id);
+
+                return (
+                  <li key={stop.id}>
+                    <button
+                      type="button"
+                      className={`stop-card ${stop.id === selectedStopId ? 'selected' : ''}`}
+                      onClick={() => setSelectedStopId(stop.id)}
+                    >
+                      <span className={stop.remoteWork ? 'stop-index remote' : 'stop-index'}>
+                        {stop.order}
                       </span>
-                    )}
-                  </button>
-                </li>
-              ))}
+                      <span className="stop-copy">
+                        <strong>{stop.label}</strong>
+                        <small>
+                          <CalendarDays size={14} />
+                          {formatDate(stop.date)}
+                        </small>
+                        {driveEstimate && (
+                          <small className="drive-summary">
+                            <Route size={14} />
+                            {formatDriveSummary(driveEstimate, gasPrice, fuelMpg)}
+                          </small>
+                        )}
+                      </span>
+                      {stop.remoteWork && (
+                        <span className="mini-badge" title="Remote-work stop">
+                          <Wifi size={14} />
+                        </span>
+                      )}
+                    </button>
+                  </li>
+                );
+              })}
             </ol>
           </section>
 
@@ -1058,6 +1264,7 @@ function App() {
               fitSignal={fitSignal}
               onSelectStop={setSelectedStopId}
               onRouteDistanceChange={setDrivingMiles}
+              onDriveEstimatesChange={setRoadDriveEstimates}
             />
           ) : (
             <div className="map-state">
@@ -1233,6 +1440,7 @@ function MapCanvas({
   fitSignal,
   onSelectStop,
   onRouteDistanceChange,
+  onDriveEstimatesChange,
 }: MapCanvasProps) {
   const mapRef = useRef<google.maps.Map | null>(null);
   const routePolylinesRef = useRef<google.maps.Polyline[]>([]);
@@ -1285,6 +1493,7 @@ function MapCanvas({
       setRouteError('');
       setRouteWarnings([]);
       onRouteDistanceChange(null);
+      onDriveEstimatesChange(null);
       return undefined;
     }
 
@@ -1294,6 +1503,7 @@ function MapCanvas({
     setRouteError('');
     setRouteWarnings([]);
     onRouteDistanceChange(null);
+    onDriveEstimatesChange(null);
 
     const timeoutId = window.setTimeout(() => {
       const chunks = splitStopsForDirections(stops);
@@ -1326,6 +1536,7 @@ function MapCanvas({
           setRouteError('');
           setRouteWarnings(routes.flatMap((route) => route.warnings || []));
           onRouteDistanceChange(calculateRoadRouteMiles(routes));
+          onDriveEstimatesChange(buildRoadDriveEstimates(routes, stops));
         })
         .catch((error: Error) => {
           if (canceled) return;
@@ -1335,6 +1546,7 @@ function MapCanvas({
           setRouteError(error.message);
           setRouteWarnings([]);
           onRouteDistanceChange(null);
+          onDriveEstimatesChange(null);
         });
     }, 300);
 
@@ -1343,7 +1555,7 @@ function MapCanvas({
       window.clearTimeout(timeoutId);
       clearRoutePolylines();
     };
-  }, [directionsKey, isLoaded, mapInstance, onRouteDistanceChange, stops]);
+  }, [directionsKey, isLoaded, mapInstance, onDriveEstimatesChange, onRouteDistanceChange, stops]);
 
   if (loadError) {
     return (
