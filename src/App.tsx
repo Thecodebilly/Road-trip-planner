@@ -846,6 +846,19 @@ function formatDate(date: string) {
   }).format(parsed);
 }
 
+function formatScheduleDate(date: string) {
+  if (!date) return 'Unscheduled';
+
+  const parsed = new Date(`${date}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) return date;
+
+  return new Intl.DateTimeFormat('en', {
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+  }).format(parsed);
+}
+
 function formatMapDateRange(stops: TripStop[]) {
   const uniqueDates = Array.from(
     new Set(
@@ -2523,7 +2536,7 @@ function App() {
                         <strong>{stop.label}</strong>
                         <small>
                           <CalendarDays size={14} />
-                          {formatDate(stop.date)}
+                          {formatScheduleDate(stop.date)}
                         </small>
                         {driveEstimate && (
                           <small className="drive-summary">
@@ -3556,7 +3569,7 @@ function MapCanvas({
                       onSelectStop(stop.id);
                     }}
                   >
-                    <span>{formatDate(stop.date)}</span>
+                    <span>{formatScheduleDate(stop.date)}</span>
                     <strong>{stop.label}</strong>
                     <small>{stop.notes || 'No notes yet.'}</small>
                   </button>
