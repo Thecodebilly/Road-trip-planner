@@ -18,11 +18,13 @@ import {
   Download,
   Eye,
   FilePlus2,
+  FileText,
   FolderOpen,
   Import,
   LocateFixed,
   MapPin,
   Maximize2,
+  Paperclip,
   Plus,
   Route,
   Save,
@@ -36,6 +38,7 @@ import tripStops from './tripStops.json';
 
 type SleepingArrangement = 'camping' | 'hotel' | 'friend';
 type HotelRegion = 'Northeast' | 'South' | 'Midwest' | 'West';
+type TripDocumentKind = 'text' | 'file';
 
 type ImportedTripStop = {
   order: number;
@@ -69,6 +72,7 @@ type MapStopGroup = {
   stops: TripStop[];
   stopRangeLabel: string;
   dateRangeLabel: string;
+  sleepingArrangement: SleepingArrangement | 'mixed';
   hasWeekend: boolean;
   hasRemoteWork: boolean;
 };
@@ -108,11 +112,26 @@ type CacheRecord<T> = {
   value: T;
 };
 
+type TripDocument = {
+  id: string;
+  title: string;
+  kind: TripDocumentKind;
+  linkedStopId: string;
+  text: string;
+  fileName: string;
+  mimeType: string;
+  fileSize: number;
+  dataUrl: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type Trip = {
   id: string;
   name: string;
   notes: string;
   stops: TripStop[];
+  documents: TripDocument[];
   createdAt: string;
   updatedAt: string;
 };
@@ -192,6 +211,7 @@ const routeCacheTtlMs = 7 * 24 * 60 * 60 * 1000;
 const hotelCacheTtlMs = 24 * 60 * 60 * 1000;
 const maxRouteCacheEntries = 12;
 const maxHotelCacheEntries = 80;
+const maxDocumentFileBytes = 1024 * 1024;
 const defaultGasPrice = 3.5;
 const defaultFuelMpg = 25;
 const estimatedAverageMph = 55;
@@ -266,6 +286,21 @@ const exportFormatExample = JSON.stringify(
       notes: 'Museum stops, desert drives, remote-work days.',
       createdAt: '2026-05-24T00:00:00.000Z',
       updatedAt: '2026-05-24T00:00:00.000Z',
+      documents: [
+        {
+          id: 'document-example-1',
+          title: 'Museum notes',
+          kind: 'text',
+          linkedStopId: 'stop-example-1',
+          text: 'Hours, ticket links, and backup plans.',
+          fileName: '',
+          mimeType: 'text/plain',
+          fileSize: 0,
+          dataUrl: '',
+          createdAt: '2026-05-24T00:00:00.000Z',
+          updatedAt: '2026-05-24T00:00:00.000Z',
+        },
+      ],
       stops: [
         {
           id: 'stop-example-1',
@@ -337,6 +372,46 @@ function normalizeSleepingArrangement(value: unknown): SleepingArrangement {
     : 'camping';
 }
 
+function normalizeDocumentKind(value: unknown): TripDocumentKind {
+  return value === 'file' ? 'file' : 'text';
+}
+
+function normalizeTripDocument(
+  candidate: Partial<TripDocument> | null | undefined,
+  stopIds: Set<string>,
+): TripDocument | null {
+  if (!candidate || typeof candidate !== 'object') return null;
+
+  const now = new Date().toISOString();
+  const kind = normalizeDocumentKind(candidate.kind);
+  const linkedStopId =
+    typeof candidate.linkedStopId === 'string' && stopIds.has(candidate.linkedStopId)
+      ? candidate.linkedStopId
+      : '';
+  const fileName = typeof candidate.fileName === 'string' ? candidate.fileName : '';
+  const text = typeof candidate.text === 'string' ? candidate.text : '';
+  const dataUrl = typeof candidate.dataUrl === 'string' ? candidate.dataUrl : '';
+
+  if (kind === 'file' && !dataUrl) return null;
+
+  return {
+    id: typeof candidate.id === 'string' ? candidate.id : makeId('document'),
+    title:
+      (typeof candidate.title === 'string' && candidate.title.trim()) ||
+      fileName ||
+      (kind === 'file' ? 'Untitled file' : 'Untitled note'),
+    kind,
+    linkedStopId,
+    text: kind === 'text' ? text : '',
+    fileName: kind === 'file' ? fileName : '',
+    mimeType: typeof candidate.mimeType === 'string' ? candidate.mimeType : 'text/plain',
+    fileSize: Number.isFinite(candidate.fileSize) ? Number(candidate.fileSize) : 0,
+    dataUrl: kind === 'file' ? dataUrl : '',
+    createdAt: typeof candidate.createdAt === 'string' ? candidate.createdAt : now,
+    updatedAt: typeof candidate.updatedAt === 'string' ? candidate.updatedAt : now,
+  };
+}
+
 function normalizeTrip(candidate: Partial<Trip> | null | undefined): Trip | null {
   if (!candidate || !Array.isArray(candidate.stops)) return null;
 
@@ -355,12 +430,19 @@ function normalizeTrip(candidate: Partial<Trip> | null | undefined): Trip | null
       sleepingArrangement: normalizeSleepingArrangement(stop.sleepingArrangement),
       friendName: typeof stop.friendName === 'string' ? stop.friendName : '',
     }));
+  const stopIds = new Set(stops.map((stop) => stop.id));
+  const documents = Array.isArray(candidate.documents)
+    ? candidate.documents
+        .map((document) => normalizeTripDocument(document, stopIds))
+        .filter((document): document is TripDocument => Boolean(document))
+    : [];
 
   return {
     id: typeof candidate.id === 'string' ? candidate.id : makeId('trip'),
     name: candidate.name?.trim() || 'Untitled trip',
     notes: typeof candidate.notes === 'string' ? candidate.notes : '',
     stops: resequenceStops(stops),
+    documents,
     createdAt: typeof candidate.createdAt === 'string' ? candidate.createdAt : now,
     updatedAt: typeof candidate.updatedAt === 'string' ? candidate.updatedAt : now,
   };
@@ -374,6 +456,7 @@ function createDefaultTrip(): Trip {
     name: '2026 USA itinerary',
     notes: 'Jacksonville to Winston-Salem through the Southwest, California, and the Blue Ridge.',
     stops: seedStops,
+    documents: [],
     createdAt: now,
     updatedAt: now,
   };
@@ -400,6 +483,7 @@ function createBlankTrip(): Trip {
         friendName: '',
       },
     ],
+    documents: [],
     createdAt: now,
     updatedAt: now,
   };
@@ -648,6 +732,89 @@ function downloadExportedTrip(exportedTrip: ExportedTrip) {
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+}
+
+function createTextDocument(linkedStopId = ''): TripDocument {
+  const now = new Date().toISOString();
+
+  return {
+    id: makeId('document'),
+    title: 'Untitled note',
+    kind: 'text',
+    linkedStopId,
+    text: '',
+    fileName: '',
+    mimeType: 'text/plain',
+    fileSize: 0,
+    dataUrl: '',
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function createFileDocument(file: File, dataUrl: string, linkedStopId = ''): TripDocument {
+  const now = new Date().toISOString();
+
+  return {
+    id: makeId('document'),
+    title: file.name,
+    kind: 'file',
+    linkedStopId,
+    text: '',
+    fileName: file.name,
+    mimeType: file.type || 'application/octet-stream',
+    fileSize: file.size,
+    dataUrl,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        resolve(reader.result);
+        return;
+      }
+
+      reject(new Error('INVALID_FILE_RESULT'));
+    };
+    reader.onerror = () => reject(reader.error || new Error('FILE_READ_FAILED'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function formatFileSize(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return 'Size n/a';
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatDocumentLocation(document: TripDocument, stops: TripStop[]) {
+  if (!document.linkedStopId) return 'Whole trip';
+
+  const stop = stops.find((candidate) => candidate.id === document.linkedStopId);
+  return stop ? `Stop ${stop.order}: ${stop.label}` : 'Whole trip';
+}
+
+function downloadTripDocument(document: TripDocument) {
+  const url =
+    document.kind === 'file'
+      ? document.dataUrl
+      : URL.createObjectURL(new Blob([document.text], { type: 'text/plain;charset=utf-8' }));
+  const link = window.document.createElement('a');
+
+  link.href = url;
+  link.download =
+    document.kind === 'file' ? document.fileName || document.title : `${sanitizeFileName(document.title)}.txt`;
+  window.document.body.appendChild(link);
+  link.click();
+  link.remove();
+
+  if (document.kind !== 'file') URL.revokeObjectURL(url);
 }
 
 async function copyText(value: string) {
@@ -1083,6 +1250,23 @@ function formatDriveSummary(estimate: DriveEstimate, gasPrice: number, fuelMpg: 
   )} | ${formatGasCost(estimate.distanceMiles, gasPrice, fuelMpg)} gas`;
 }
 
+function formatSleepingArrangementLabel(value: SleepingArrangement | 'mixed') {
+  switch (value) {
+    case 'hotel':
+      return 'Hotel';
+    case 'friend':
+      return 'Friend';
+    case 'mixed':
+      return 'Mixed';
+    default:
+      return 'Camping';
+  }
+}
+
+function getSleepClass(value: SleepingArrangement | 'mixed') {
+  return `sleep-${value}`;
+}
+
 function groupMapStops(stops: TripStop[]): MapStopGroup[] {
   const groups = new Map<string, TripStop[]>();
 
@@ -1094,12 +1278,15 @@ function groupMapStops(stops: TripStop[]): MapStopGroup[] {
   return Array.from(groups.entries()).map(([key, groupedStops]) => {
     const sortedStops = [...groupedStops].sort((first, second) => first.order - second.order);
     const firstStop = sortedStops[0];
+    const sleepingArrangements = Array.from(new Set(sortedStops.map((stop) => stop.sleepingArrangement)));
+
     return {
       id: `${key}:${sortedStops.map((stop) => stop.id).join('-')}`,
       position: { lat: firstStop.lat, lng: firstStop.lng },
       stops: sortedStops,
       stopRangeLabel: formatMapStopRange(sortedStops),
       dateRangeLabel: formatMapDateRange(sortedStops),
+      sleepingArrangement: sleepingArrangements.length === 1 ? sleepingArrangements[0] : 'mixed',
       hasWeekend: sortedStops.some((stop) => isWeekendDate(stop.date)),
       hasRemoteWork: sortedStops.some((stop) => stop.remoteWork),
     };
@@ -1390,6 +1577,8 @@ function calculateRoadRouteMiles(routes: RoadRoute[]) {
 function App() {
   const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
   const importInputRef = useRef<HTMLInputElement | null>(null);
+  const documentInputRef = useRef<HTMLInputElement | null>(null);
+  const documentUploadStopIdRef = useRef('');
   const [savedTrips, setSavedTrips] = useState<Trip[]>(readSavedTrips);
   const [activeTrip, setActiveTrip] = useState<Trip>(() => readActiveTrip() || createDefaultTrip());
   const [selectedStopId, setSelectedStopId] = useState<string | null>(
@@ -1412,6 +1601,7 @@ function App() {
   const [isImporting, setIsImporting] = useState(false);
   const [drivingMiles, setDrivingMiles] = useState<number | null>(null);
   const [roadDriveEstimates, setRoadDriveEstimates] = useState<DriveEstimate[] | null>(null);
+  const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
   const [gasPrice, setGasPrice] = useState(() => readNumberStorage(gasPriceKey, defaultGasPrice));
   const [fuelMpg, setFuelMpg] = useState(() => readNumberStorage(fuelMpgKey, defaultFuelMpg, 0.01));
   const [previewExport, setPreviewExport] = useState<ExportedTrip | null>(null);
@@ -1441,6 +1631,15 @@ function App() {
   const displayLodgingCost = formatCurrency(lodgingCost);
   const displayTripTotal = formatCurrency(gasCost + lodgingCost);
   const remoteStops = useMemo(() => stops.filter((stop) => stop.remoteWork).length, [stops]);
+  const documents = activeTrip.documents;
+  const selectedDocument = useMemo(
+    () => documents.find((document) => document.id === selectedDocumentId) || null,
+    [documents, selectedDocumentId],
+  );
+  const selectedStopDocuments = useMemo(
+    () => (selectedStop ? documents.filter((document) => document.linkedStopId === selectedStop.id) : []),
+    [documents, selectedStop],
+  );
   const dateRange = useMemo(() => formatStopDateRange(stops), [stops]);
   const saveBackendLabel =
     saveBackend === 'database' ? 'DB' : saveBackend === 'local' ? 'Local' : 'Sync';
@@ -1536,9 +1735,23 @@ function App() {
     }
   }, [selectedStopId, stops]);
 
+  useEffect(() => {
+    if (selectedDocumentId && !documents.some((document) => document.id === selectedDocumentId)) {
+      setSelectedDocumentId(null);
+    }
+  }, [documents, selectedDocumentId]);
+
   const touchTrip = (updater: (trip: Trip) => Trip) => {
     setDrivingMiles(null);
     setRoadDriveEstimates(null);
+    setActiveTrip((trip) => ({
+      ...updater(trip),
+      updatedAt: new Date().toISOString(),
+    }));
+    setSaveMessage('');
+  };
+
+  const touchTripMetadata = (updater: (trip: Trip) => Trip) => {
     setActiveTrip((trip) => ({
       ...updater(trip),
       updatedAt: new Date().toISOString(),
@@ -1563,6 +1776,69 @@ function App() {
     const nextValue = Number(value);
     if (!Number.isFinite(nextValue)) return;
     updateStop(stopId, { [field]: nextValue });
+  };
+
+  const updateDocument = (documentId: string, updates: Partial<TripDocument>) => {
+    const now = new Date().toISOString();
+
+    touchTripMetadata((trip) => ({
+      ...trip,
+      documents: trip.documents.map((document) =>
+        document.id === documentId ? { ...document, ...updates, updatedAt: now } : document,
+      ),
+    }));
+  };
+
+  const addTextDocument = (linkedStopId = '') => {
+    const newDocument = createTextDocument(linkedStopId);
+
+    touchTripMetadata((trip) => ({
+      ...trip,
+      documents: [newDocument, ...trip.documents],
+    }));
+    setSelectedDocumentId(newDocument.id);
+  };
+
+  const startDocumentUpload = (linkedStopId = '') => {
+    documentUploadStopIdRef.current = linkedStopId;
+    documentInputRef.current?.click();
+  };
+
+  const importDocumentFile = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = '';
+    if (!file) return;
+
+    if (file.size > maxDocumentFileBytes) {
+      setSaveMessage(`Document file must be ${formatFileSize(maxDocumentFileBytes)} or smaller`);
+      return;
+    }
+
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      const newDocument = createFileDocument(file, dataUrl, documentUploadStopIdRef.current);
+
+      touchTripMetadata((trip) => ({
+        ...trip,
+        documents: [newDocument, ...trip.documents],
+      }));
+      setSelectedDocumentId(newDocument.id);
+      setSaveMessage(`Attached ${file.name}`);
+    } catch {
+      setSaveMessage('Document upload failed');
+    } finally {
+      documentUploadStopIdRef.current = '';
+    }
+  };
+
+  const deleteDocument = (documentId: string) => {
+    const nextSelection = documents.find((document) => document.id !== documentId)?.id || null;
+
+    touchTripMetadata((trip) => ({
+      ...trip,
+      documents: trip.documents.filter((document) => document.id !== documentId),
+    }));
+    setSelectedDocumentId(nextSelection);
   };
 
   const updateGasPrice = (value: string) => {
@@ -1709,6 +1985,9 @@ function App() {
     touchTrip((trip) => ({
       ...trip,
       stops: resequenceStops(trip.stops.filter((stop) => stop.id !== selectedStop.id)),
+      documents: trip.documents.map((document) =>
+        document.linkedStopId === selectedStop.id ? { ...document, linkedStopId: '' } : document,
+      ),
     }));
     setSelectedStopId(nextSelection?.id || null);
   };
@@ -1767,6 +2046,7 @@ function App() {
       setRoadDriveEstimates(null);
       setActiveTrip(importedTrip);
       setSelectedStopId(importedTrip.stops[0]?.id || null);
+      setSelectedDocumentId(importedTrip.documents[0]?.id || null);
       setSavedTrips(nextSavedTrips);
       setCurrentView('editor');
       setFitSignal((value) => value + 1);
@@ -1829,6 +2109,7 @@ function App() {
         createdAt: now,
         updatedAt: now,
         name: result.trip.name || `${activeTrip.name} AI draft`,
+        documents: activeTrip.documents,
       });
 
       if (!proposedTrip) {
@@ -1839,6 +2120,7 @@ function App() {
       setRoadDriveEstimates(null);
       setActiveTrip(proposedTrip);
       setSelectedStopId(proposedTrip.stops[0]?.id || null);
+      setSelectedDocumentId(proposedTrip.documents[0]?.id || null);
       setCurrentView('editor');
       setFitSignal((value) => value + 1);
       setRouteAssistantPrompt('');
@@ -1893,6 +2175,7 @@ function App() {
     setRoadDriveEstimates(null);
     setActiveTrip(newTrip);
     setSelectedStopId(newTrip.stops[0].id);
+    setSelectedDocumentId(null);
     setCurrentView('editor');
     setSaveMessage('');
     setFitSignal((value) => value + 1);
@@ -1906,6 +2189,7 @@ function App() {
     setRoadDriveEstimates(null);
     setActiveTrip(nextTrip);
     setSelectedStopId(nextTrip.stops[0]?.id || null);
+    setSelectedDocumentId(nextTrip.documents[0]?.id || null);
     setCurrentView('editor');
     setSaveMessage(`Loaded ${nextTrip.name}`);
     setFitSignal((value) => value + 1);
@@ -1987,6 +2271,13 @@ function App() {
             accept="application/json,.json"
             onChange={importTrip}
             aria-label="Import trip JSON"
+          />
+          <input
+            ref={documentInputRef}
+            className="file-input"
+            type="file"
+            onChange={importDocumentFile}
+            aria-label="Attach trip document"
           />
           <button type="button" className="icon-button" onClick={startNewTrip} title="New trip">
             <FilePlus2 size={18} />
@@ -2113,6 +2404,10 @@ function App() {
                 <strong>{remoteStops}</strong>
                 <span>Remote</span>
               </div>
+              <div>
+                <strong>{documents.length}</strong>
+                <span>Docs</span>
+              </div>
             </div>
 
             <div className="fuel-settings" aria-label="Fuel assumptions">
@@ -2203,15 +2498,25 @@ function App() {
             <ol className="stop-list">
               {stops.map((stop, stopIndex) => {
                 const driveEstimate = driveEstimateByStopId.get(stop.id);
+                const stopIsWeekend = isWeekendDate(stop.date);
+                const stopCardClassName = [
+                  'stop-card',
+                  getSleepClass(stop.sleepingArrangement),
+                  stop.remoteWork ? 'remote' : '',
+                  stopIsWeekend ? 'weekend' : '',
+                  stop.id === selectedStopId ? 'selected' : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ');
 
                 return (
                   <li key={stop.id}>
                     <button
                       type="button"
-                      className={`stop-card ${stop.id === selectedStopId ? 'selected' : ''}`}
+                      className={stopCardClassName}
                       onClick={() => setSelectedStopId(stop.id)}
                     >
-                      <span className={stop.remoteWork ? 'stop-index remote' : 'stop-index'}>
+                      <span className={`stop-index ${getSleepClass(stop.sleepingArrangement)}`}>
                         {stop.order}
                       </span>
                       <span className="stop-copy">
@@ -2232,6 +2537,13 @@ function App() {
                             {formatSleepingArrangementSummary(stop, stopIndex, stops)}
                           </small>
                         )}
+                        <span className="stop-tags">
+                          <span className={`stop-tag ${getSleepClass(stop.sleepingArrangement)}`}>
+                            {formatSleepingArrangementLabel(stop.sleepingArrangement)}
+                          </span>
+                          {stop.remoteWork && <span className="stop-tag remote">Remote</span>}
+                          {stopIsWeekend && <span className="stop-tag weekend">Weekend</span>}
+                        </span>
                       </span>
                       {stop.remoteWork && (
                         <span className="mini-badge" title="Remote-work stop">
@@ -2243,6 +2555,50 @@ function App() {
                 );
               })}
             </ol>
+          </section>
+
+          <section className="panel-section documents-panel">
+            <div className="section-heading">
+              <h2>Documents</h2>
+              <span>{documents.length}</span>
+            </div>
+            <div className="document-actions">
+              <button type="button" className="secondary-button" onClick={() => addTextDocument()}>
+                <FileText size={17} />
+                <span>New note</span>
+              </button>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => startDocumentUpload()}
+                title="Attach file"
+                aria-label="Attach file"
+              >
+                <Paperclip size={18} />
+              </button>
+            </div>
+            {documents.length ? (
+              <div className="document-list">
+                {documents.map((document) => (
+                  <button
+                    key={document.id}
+                    type="button"
+                    className={document.id === selectedDocumentId ? 'document-card selected' : 'document-card'}
+                    onClick={() => setSelectedDocumentId(document.id)}
+                  >
+                    <span className="document-icon">
+                      {document.kind === 'file' ? <Paperclip size={15} /> : <FileText size={15} />}
+                    </span>
+                    <span>
+                      <strong>{document.title}</strong>
+                      <small>{formatDocumentLocation(document, stops)}</small>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <p className="empty-copy">No documents yet.</p>
+            )}
           </section>
 
         </aside>
@@ -2373,6 +2729,25 @@ function App() {
                 <span>Remote-work stop</span>
               </label>
 
+              <div className="stop-document-actions">
+                <button type="button" className="secondary-button" onClick={() => addTextDocument(selectedStop.id)}>
+                  <FileText size={17} />
+                  <span>Stop note</span>
+                </button>
+                <button
+                  type="button"
+                  className="icon-button"
+                  onClick={() => startDocumentUpload(selectedStop.id)}
+                  title="Attach file to stop"
+                  aria-label="Attach file to stop"
+                >
+                  <Paperclip size={18} />
+                </button>
+                {selectedStopDocuments.length > 0 && (
+                  <span className="attached-count">{selectedStopDocuments.length} attached</span>
+                )}
+              </div>
+
               <div className="button-grid">
                 <button
                   type="button"
@@ -2408,6 +2783,76 @@ function App() {
             </form>
           ) : (
             <p className="empty-copy">Select a stop to edit it.</p>
+          )}
+
+          {selectedDocument && (
+            <section className="document-editor" aria-label="Selected document">
+              <div className="section-heading">
+                <h2>Document</h2>
+                <span>{selectedDocument.kind === 'file' ? 'File' : 'Text'}</span>
+              </div>
+
+              <label htmlFor="document-title">Title</label>
+              <input
+                id="document-title"
+                value={selectedDocument.title}
+                onChange={(event) => updateDocument(selectedDocument.id, { title: event.currentTarget.value })}
+              />
+
+              <label htmlFor="document-location">Location</label>
+              <select
+                id="document-location"
+                value={selectedDocument.linkedStopId}
+                onChange={(event) => updateDocument(selectedDocument.id, { linkedStopId: event.currentTarget.value })}
+              >
+                <option value="">Whole trip</option>
+                {stops.map((stop) => (
+                  <option key={stop.id} value={stop.id}>
+                    {`Stop ${stop.order}: ${stop.label}`}
+                  </option>
+                ))}
+              </select>
+
+              {selectedDocument.kind === 'text' ? (
+                <>
+                  <label htmlFor="document-text">Text</label>
+                  <textarea
+                    id="document-text"
+                    value={selectedDocument.text}
+                    onChange={(event) => updateDocument(selectedDocument.id, { text: event.currentTarget.value })}
+                    rows={7}
+                  />
+                </>
+              ) : (
+                <div className="document-file-panel">
+                  <Paperclip size={18} />
+                  <span>
+                    <strong>{selectedDocument.fileName || selectedDocument.title}</strong>
+                    <small>{formatFileSize(selectedDocument.fileSize)}</small>
+                  </span>
+                </div>
+              )}
+
+              <div className="document-editor-actions">
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() => downloadTripDocument(selectedDocument)}
+                >
+                  <Download size={17} />
+                  <span>Download</span>
+                </button>
+                <button
+                  type="button"
+                  className="icon-button danger"
+                  onClick={() => deleteDocument(selectedDocument.id)}
+                  title="Delete document"
+                  aria-label="Delete document"
+                >
+                  <Trash2 size={18} />
+                </button>
+              </div>
+            </section>
           )}
         </aside>
       </div>
@@ -2984,6 +3429,7 @@ function MapCanvas({
         const markerLabel = group.stopRangeLabel || String(group.stops[0].order);
         const className = [
           'map-stop-marker',
+          getSleepClass(group.sleepingArrangement),
           group.stops.length > 1 ? 'grouped' : '',
           group.hasRemoteWork ? 'remote' : '',
           group.hasWeekend ? 'weekend' : '',
@@ -3119,7 +3565,13 @@ function MapCanvas({
             ) : (
               <>
                 <p>{selectedStop.notes || 'No notes yet.'}</p>
-                {selectedStop.remoteWork && <span className="remote-badge">Remote-work stop</span>}
+                <span className="stop-tags map-info-tags">
+                  <span className={`stop-tag ${getSleepClass(selectedStop.sleepingArrangement)}`}>
+                    {formatSleepingArrangementLabel(selectedStop.sleepingArrangement)}
+                  </span>
+                  {selectedStop.remoteWork && <span className="stop-tag remote">Remote</span>}
+                  {isWeekendDate(selectedStop.date) && <span className="stop-tag weekend">Weekend</span>}
+                </span>
               </>
             )}
           </div>

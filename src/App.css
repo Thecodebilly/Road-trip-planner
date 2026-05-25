@@ -477,24 +477,76 @@ textarea:focus {
 }
 
 .stop-card {
+  --sleep-color: #0f766e;
+  --sleep-bg: #f5fbf9;
+  --sleep-border: #b9ddd5;
   width: 100%;
   min-height: 64px;
+  position: relative;
   gap: 0.65rem;
   padding: 0.65rem;
-  border: 1px solid #dfe5ec;
+  border: 1px solid var(--sleep-border);
+  border-left-width: 5px;
   border-radius: 8px;
-  background: #ffffff;
+  background: linear-gradient(90deg, var(--sleep-bg), #ffffff 42%);
   text-align: left;
+}
+
+.stop-card.sleep-hotel {
+  --sleep-color: #1f4e79;
+  --sleep-bg: #f2f7fd;
+  --sleep-border: #b9d4ef;
+}
+
+.stop-card.sleep-friend {
+  --sleep-color: #7a3f12;
+  --sleep-bg: #fff8eb;
+  --sleep-border: #efd19d;
+}
+
+.stop-card.remote {
+  box-shadow: inset -4px 0 0 #9f2d55;
+}
+
+.stop-card.weekend {
+  border-top-color: #f0b429;
+  border-top-width: 3px;
+  box-shadow: 0 0 0 2px rgba(240, 180, 41, 0.2);
+}
+
+.stop-card.remote.weekend {
+  box-shadow:
+    inset -4px 0 0 #9f2d55,
+    0 0 0 2px rgba(240, 180, 41, 0.24);
 }
 
 .stop-card:hover,
 .stop-card.selected {
-  border-color: #0f766e;
-  background: #f5fbf9;
+  border-color: var(--sleep-color);
+  background: var(--sleep-bg);
 }
 
 .stop-card.selected {
-  box-shadow: inset 3px 0 0 #0f766e;
+  box-shadow: inset 3px 0 0 var(--sleep-color);
+}
+
+.stop-card.selected.remote {
+  box-shadow:
+    inset 3px 0 0 var(--sleep-color),
+    inset -4px 0 0 #9f2d55;
+}
+
+.stop-card.selected.weekend {
+  box-shadow:
+    inset 3px 0 0 var(--sleep-color),
+    0 0 0 2px rgba(240, 180, 41, 0.24);
+}
+
+.stop-card.selected.remote.weekend {
+  box-shadow:
+    inset 3px 0 0 var(--sleep-color),
+    inset -4px 0 0 #9f2d55,
+    0 0 0 2px rgba(240, 180, 41, 0.24);
 }
 
 .stop-index {
@@ -511,8 +563,12 @@ textarea:focus {
   font-weight: 900;
 }
 
-.stop-index.remote {
-  background: #9f2d55;
+.stop-index.sleep-hotel {
+  background: #1f4e79;
+}
+
+.stop-index.sleep-friend {
+  background: #7a3f12;
 }
 
 .stop-copy {
@@ -553,6 +609,56 @@ textarea:focus {
   font-weight: 800;
   line-height: 1.25;
   white-space: normal;
+}
+
+.stop-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.28rem;
+  margin-top: 0.1rem;
+}
+
+.stop-tag {
+  min-height: 20px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 0.42rem;
+  border-radius: 999px;
+  background: #edf2f7;
+  color: #344054;
+  font-size: 0.68rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.stop-tag.sleep-camping {
+  background: #dff3ed;
+  color: #115e59;
+}
+
+.stop-tag.sleep-hotel {
+  background: #e1effb;
+  color: #1f4e79;
+}
+
+.stop-tag.sleep-friend {
+  background: #ffedc8;
+  color: #7a3f12;
+}
+
+.stop-tag.remote {
+  background: #fdecef;
+  color: #9f2d55;
+}
+
+.stop-tag.weekend {
+  background: #fff1b8;
+  color: #7a5600;
+  box-shadow: inset 0 0 0 1px rgba(122, 86, 0, 0.18);
+}
+
+.map-info-tags {
+  margin-top: 0.55rem;
 }
 
 .mini-badge {
@@ -611,6 +717,76 @@ textarea:focus {
 .saved-actions .icon-button {
   width: 34px;
   height: 34px;
+}
+
+.documents-panel {
+  border-bottom: 0;
+}
+
+.document-actions,
+.stop-document-actions,
+.document-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.document-list {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.document-card {
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.65rem;
+  border: 1px solid #dfe5ec;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #17202a;
+  text-align: left;
+  cursor: pointer;
+}
+
+.document-card:hover,
+.document-card.selected {
+  border-color: #7a3f12;
+  background: #fffaf2;
+}
+
+.document-icon {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  background: #fff1d6;
+  color: #7a3f12;
+}
+
+.document-card span:last-child {
+  min-width: 0;
+  display: grid;
+  gap: 0.12rem;
+}
+
+.document-card strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.document-card small,
+.attached-count {
+  color: #667085;
+  font-size: 0.78rem;
+  font-weight: 700;
 }
 
 .saved-page {
@@ -894,6 +1070,7 @@ textarea:focus {
 }
 
 .map-stop-marker {
+  --marker-color: #0f766e;
   min-width: 28px;
   height: 28px;
   display: inline-flex;
@@ -902,7 +1079,7 @@ textarea:focus {
   padding: 0 0.4rem;
   border: 2px solid #ffffff;
   border-radius: 999px;
-  background: #0f766e;
+  background: var(--marker-color);
   box-shadow: 0 8px 18px rgba(23, 32, 42, 0.24);
   color: #ffffff;
   cursor: pointer;
@@ -915,6 +1092,18 @@ textarea:focus {
   transform-origin: center;
 }
 
+.map-stop-marker.sleep-hotel {
+  --marker-color: #1f4e79;
+}
+
+.map-stop-marker.sleep-friend {
+  --marker-color: #7a3f12;
+}
+
+.map-stop-marker.sleep-mixed {
+  background: linear-gradient(135deg, #0f766e 0 33%, #1f4e79 33% 66%, #7a3f12 66% 100%);
+}
+
 .map-stop-marker.grouped {
   min-width: 42px;
   height: 26px;
@@ -923,20 +1112,51 @@ textarea:focus {
 }
 
 .map-stop-marker.remote {
-  background: #9f2d55;
+  box-shadow:
+    0 0 0 3px rgba(159, 45, 85, 0.35),
+    0 8px 18px rgba(23, 32, 42, 0.24);
 }
 
 .map-stop-marker.weekend {
-  border-color: #17202a;
+  border-color: #f0b429;
   box-shadow:
-    0 0 0 2px rgba(255, 255, 255, 0.82),
+    0 0 0 4px rgba(240, 180, 41, 0.36),
+    0 8px 18px rgba(23, 32, 42, 0.24);
+}
+
+.map-stop-marker.remote.weekend {
+  box-shadow:
+    0 0 0 3px rgba(159, 45, 85, 0.35),
+    0 0 0 7px rgba(240, 180, 41, 0.32),
     0 8px 18px rgba(23, 32, 42, 0.24);
 }
 
 .map-stop-marker.selected {
   transform: scale(1.08);
   box-shadow:
-    0 0 0 3px rgba(15, 118, 110, 0.22),
+    0 0 0 3px rgba(23, 32, 42, 0.24),
+    0 10px 22px rgba(23, 32, 42, 0.28);
+}
+
+.map-stop-marker.selected.remote {
+  box-shadow:
+    0 0 0 3px rgba(159, 45, 85, 0.36),
+    0 0 0 6px rgba(23, 32, 42, 0.2),
+    0 10px 22px rgba(23, 32, 42, 0.28);
+}
+
+.map-stop-marker.selected.weekend {
+  box-shadow:
+    0 0 0 4px rgba(240, 180, 41, 0.38),
+    0 0 0 7px rgba(23, 32, 42, 0.18),
+    0 10px 22px rgba(23, 32, 42, 0.28);
+}
+
+.map-stop-marker.selected.remote.weekend {
+  box-shadow:
+    0 0 0 3px rgba(159, 45, 85, 0.36),
+    0 0 0 7px rgba(240, 180, 41, 0.34),
+    0 0 0 10px rgba(23, 32, 42, 0.16),
     0 10px 22px rgba(23, 32, 42, 0.28);
 }
 
@@ -1068,6 +1288,7 @@ textarea:focus {
 
 .coordinate-grid,
 .sleeping-section,
+.document-editor,
 .button-grid {
   display: grid;
   gap: 0.55rem;
@@ -1095,6 +1316,58 @@ textarea:focus {
   font-size: 0.8rem;
   font-weight: 700;
   line-height: 1.35;
+}
+
+.stop-document-actions {
+  flex-wrap: wrap;
+}
+
+.stop-document-actions .secondary-button {
+  flex: 1;
+}
+
+.document-editor {
+  padding-top: 1rem;
+  border-top: 1px solid #e7edf3;
+}
+
+.document-file-panel {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  padding: 0.75rem;
+  border: 1px solid #dfe5ec;
+  border-radius: 8px;
+  background: #fbfcfd;
+}
+
+.document-file-panel svg {
+  flex: 0 0 auto;
+  color: #7a3f12;
+}
+
+.document-file-panel span {
+  min-width: 0;
+  display: grid;
+  gap: 0.12rem;
+}
+
+.document-file-panel strong,
+.document-file-panel small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.document-file-panel small {
+  color: #667085;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.document-editor-actions {
+  justify-content: space-between;
 }
 
 .toggle-row {
@@ -1273,6 +1546,7 @@ code {
 
   .stop-form textarea,
   .sleeping-section,
+  .stop-document-actions,
   .toggle-row,
   .button-grid {
     grid-column: 1 / -1;
@@ -1396,6 +1670,11 @@ code {
   .primary-button,
   .secondary-button {
     flex: 1;
+  }
+
+  .document-actions,
+  .document-editor-actions {
+    flex-wrap: wrap;
   }
 
   .save-status {

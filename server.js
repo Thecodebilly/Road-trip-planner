@@ -15,7 +15,7 @@ const port = Number(process.env.PORT) || 3000;
 const databaseUrl = process.env.DATABASE_URL;
 const openaiToken = process.env.OPENAI_TOKEN || process.env.OPENAI_API_KEY;
 const openaiModel = process.env.OPENAI_MODEL || 'gpt-5-mini';
-const maxBodyBytes = 2 * 1024 * 1024;
+const maxBodyBytes = 8 * 1024 * 1024;
 
 const routeProposalSchema = {
   type: 'object',
@@ -94,6 +94,41 @@ let databaseSetupError = null;
 
 function normalizeSleepingArrangement(value) {
   return ['camping', 'hotel', 'friend'].includes(value) ? value : 'camping';
+}
+
+function normalizeDocumentKind(value) {
+  return value === 'file' ? 'file' : 'text';
+}
+
+function normalizeTripDocument(value, stopIds) {
+  if (!value || typeof value !== 'object') return null;
+
+  const now = new Date().toISOString();
+  const kind = normalizeDocumentKind(value.kind);
+  const linkedStopId = typeof value.linkedStopId === 'string' && stopIds.has(value.linkedStopId)
+    ? value.linkedStopId
+    : '';
+  const fileName = typeof value.fileName === 'string' ? value.fileName : '';
+  const dataUrl = typeof value.dataUrl === 'string' ? value.dataUrl : '';
+
+  if (kind === 'file' && !dataUrl) return null;
+
+  return {
+    id: typeof value.id === 'string' && value.id ? value.id : `document-${Date.now()}`,
+    title:
+      (typeof value.title === 'string' && value.title.trim()) ||
+      fileName ||
+      (kind === 'file' ? 'Untitled file' : 'Untitled note'),
+    kind,
+    linkedStopId,
+    text: kind === 'text' && typeof value.text === 'string' ? value.text : '',
+    fileName: kind === 'file' ? fileName : '',
+    mimeType: typeof value.mimeType === 'string' ? value.mimeType : 'text/plain',
+    fileSize: Number.isFinite(Number(value.fileSize)) ? Number(value.fileSize) : 0,
+    dataUrl: kind === 'file' ? dataUrl : '',
+    createdAt: typeof value.createdAt === 'string' ? value.createdAt : now,
+    updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : now,
+  };
 }
 
 const databaseReady = pool
@@ -176,12 +211,19 @@ function normalizeTrip(value) {
     .map((stop, index) => ({ ...stop, order: index + 1 }));
 
   if (!stops.length) return null;
+  const stopIds = new Set(stops.map((stop) => stop.id));
+  const documents = Array.isArray(value.documents)
+    ? value.documents
+        .map((document) => normalizeTripDocument(document, stopIds))
+        .filter(Boolean)
+    : [];
 
   return {
     id: value.id,
     name: value.name.trim() || 'Untitled trip',
     notes: typeof value.notes === 'string' ? value.notes : '',
     stops,
+    documents,
     createdAt: typeof value.createdAt === 'string' ? value.createdAt : now,
     updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : now,
   };
