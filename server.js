@@ -547,6 +547,56 @@ function estimateRoadMiles(previous, next) {
   return Math.round(calculatePointMiles(previous, next) * 1.2);
 }
 
+function looksLikePurposefulSplitDriveStop(stop) {
+  const text = `${stop?.label || ''} ${stop?.notes || ''}`;
+
+  return /\b(event|show|concert|festival|game|tour|museum|park|hike|trail|view|scenic|overlook|meal|lunch|dinner|breakfast|restaurant|reservation|appointment|wedding|conference|meet|meetup|visit|attraction|stopover|rest|break|detour|activity)\b/i.test(text);
+}
+
+function buildSameDateCarDriveDays(currentLegs, maxOneDayCarDriveHours) {
+  const sessionsByDate = new Map();
+
+  currentLegs.forEach((leg) => {
+    if (leg.travelMode !== 'car' || !isDateOnly(leg.date)) return;
+
+    const sessions = sessionsByDate.get(leg.date) || [];
+    sessions.push(leg);
+    sessionsByDate.set(leg.date, sessions);
+  });
+
+  return Array.from(sessionsByDate.entries())
+    .filter(([, sessions]) => sessions.length > 1)
+    .map(([date, sessions]) => {
+      const totalDriveHours = Math.round(
+        sessions.reduce((total, session) => total + session.estimatedDriveHours, 0) * 10,
+      ) / 10;
+      const middleStops = sessions.slice(0, -1);
+
+      return {
+        date,
+        carDriveSessions: sessions.length,
+        totalDriveHours,
+        withinDailyLimit: totalDriveHours <= maxOneDayCarDriveHours,
+        hasPurposefulMiddleStop: middleStops.some((session) => session.toLooksLikePurposefulStop),
+        middleStops: middleStops.map((session) => ({
+          order: session.toOrder,
+          label: session.to,
+          estimatedDriveHours: session.estimatedDriveHours,
+          looksPurposeful: session.toLooksLikePurposefulStop,
+        })),
+        overnightStop: sessions[sessions.length - 1]?.to || '',
+        sessions: sessions.map((session) => ({
+          fromOrder: session.fromOrder,
+          toOrder: session.toOrder,
+          from: session.from,
+          to: session.to,
+          estimatedDriveMiles: session.estimatedDriveMiles,
+          estimatedDriveHours: session.estimatedDriveHours,
+        })),
+      };
+    });
+}
+
 function instructionAllowsNonCarTravel(instruction, trip) {
   if (trip.stops.some((stop, index) => index > 0 && stop.travelMode !== 'car')) return true;
 
@@ -568,6 +618,28 @@ function enforceTravelModeRules(originalTrip, proposedStops, instruction) {
 
 function buildDrivingPlanningContext(trip, maxOneDayCarDriveHours) {
   const maxOneDayCarLegMiles = Math.round(maxOneDayCarDriveHours * estimatedCarAverageMph);
+  const currentLegs = trip.stops.slice(1).map((stop, index) => {
+    const previous = trip.stops[index];
+    const estimatedDriveMiles = estimateRoadMiles(previous, stop);
+    const estimatedDriveHours = Math.round((estimatedDriveMiles / estimatedCarAverageMph) * 10) / 10;
+
+    return {
+      fromOrder: previous.order,
+      toOrder: stop.order,
+      from: previous.label,
+      to: stop.label,
+      date: stop.date,
+      travelMode: stop.travelMode,
+      sameDateAsPreviousStop:
+        isDateOnly(stop.date) && isDateOnly(previous.date) && stop.date === previous.date,
+      toLooksLikePurposefulStop: looksLikePurposefulSplitDriveStop(stop),
+      toRemoteWork: stop.remoteWork,
+      estimatedDriveMiles,
+      estimatedDriveHours,
+      traversableInOneDay:
+        stop.travelMode !== 'car' || estimatedDriveHours <= maxOneDayCarDriveHours,
+    };
+  });
 
   return {
     travelMode: 'passenger-car',
@@ -576,23 +648,8 @@ function buildDrivingPlanningContext(trip, maxOneDayCarDriveHours) {
     maxOneDayCarLegMiles,
     estimatedCarAverageMph,
     maxOneDayCarDriveHours,
-    currentLegs: trip.stops.slice(1).map((stop, index) => {
-      const previous = trip.stops[index];
-      const estimatedDriveMiles = estimateRoadMiles(previous, stop);
-      const estimatedDriveHours = Math.round((estimatedDriveMiles / estimatedCarAverageMph) * 10) / 10;
-
-      return {
-        fromOrder: previous.order,
-        toOrder: stop.order,
-        from: previous.label,
-        to: stop.label,
-        travelMode: stop.travelMode,
-        estimatedDriveMiles,
-        estimatedDriveHours,
-        traversableInOneDay:
-          stop.travelMode !== 'car' || estimatedDriveHours <= maxOneDayCarDriveHours,
-      };
-    }),
+    currentLegs,
+    sameDateCarDriveDays: buildSameDateCarDriveDays(currentLegs, maxOneDayCarDriveHours),
   };
 }
 
@@ -781,6 +838,11 @@ async function handleApi(request, response, url) {
           'For plane or boat legs, use plausible airport, ferry, or dock-adjacent destinations and mention the non-car leg in notes. The app will estimate plane/boat cost separately.',
           `Every car leg must be traversable in one day: target roughly ${targetCarLegMiles} miles or less when practical, and do not create car legs over ${maxOneDayCarDriveHours} driving hours.`,
           `If a requested car route would exceed ${maxOneDayCarDriveHours} driving hours, add intermediate overnight stops with travelMode=car rather than leaving one oversized leg. Only use plane or boat for that leg if the user explicitly asks for non-car travel.`,
+          "Plan each road-trip date around one primary car-driving session that ends at that date's overnight stop.",
+          'Do not create multiple ordinary car-driving shifts on the same date just to chain route segments or work around the daily drive limit.',
+          `Two car-driving sessions on one date are allowed only when the middle stop is a real event, reservation, meetup, scenic stop, attraction, meal, or rest break, the middle stop notes explain that purpose, and total same-date car driving stays within ${maxOneDayCarDriveHours} hours.`,
+          'Do not invent fake events solely to justify split driving. If a day would need multiple normal driving shifts, move one stop to another date or add an overnight stop instead.',
+          'Do not create three or more car-driving sessions on one date. Avoid adding split-drive sessions on remote-work dates unless the supplied route already had that exact pattern.',
           'The first and last stops are locked anchors. Keep them as the first and last stops with the same date, label, latitude, and longitude.',
           'The locked start/end date range cannot change. Keep all dated stops inside that inclusive range when both dates are known.',
           'If the user asks to change a locked start/end date or location, ignore that part and explain in the summary that those anchors stayed locked.',
@@ -840,7 +902,7 @@ async function handleApi(request, response, url) {
       : 'Planned for passenger-car driving.';
 
     sendJson(response, 200, {
-      summary: `${proposal.summary} ${travelSummary} Start/end date and locations stayed locked. Remote-work dates and friend stays were kept constrained.`,
+      summary: `${proposal.summary} ${travelSummary} Start/end date and locations stayed locked. Remote-work dates, friend stays, and split-driving days were kept constrained.`,
       trip: anchoredTrip,
     });
     return;
