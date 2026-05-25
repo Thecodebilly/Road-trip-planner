@@ -20,6 +20,7 @@ const openaiToken = process.env.OPENAI_TOKEN || process.env.OPENAI_API_KEY;
 const openaiModel = process.env.OPENAI_MODEL || 'gpt-5-mini';
 const maxBodyBytes = 8 * 1024 * 1024;
 const maxRouteAssistantInstructionChars = 12000;
+const routeAssistantCooldownMs = 30 * 1000;
 const defaultWorkspaceId = 'workspace-default';
 const tripExportFormat = 'road-trip-planner.saved-trip.v1';
 const maxFileSharedTrips = 500;
@@ -106,6 +107,7 @@ const mimeTypes = new Map([
 let databaseSetupError = null;
 let fileSharedTripsReady = false;
 let fileSharedTripsWriteQueue = Promise.resolve();
+let nextRouteAssistantAllowedAt = 0;
 const fileSharedTrips = new Map();
 
 function normalizeSleepingArrangement(value) {
@@ -905,12 +907,35 @@ function readJsonBody(request) {
   });
 }
 
+function checkRouteAssistantRateLimit(response) {
+  const now = Date.now();
+  if (now < nextRouteAssistantAllowedAt) {
+    const retryAfterSeconds = Math.ceil((nextRouteAssistantAllowedAt - now) / 1000);
+
+    response.writeHead(429, {
+      'content-type': 'application/json; charset=utf-8',
+      'cache-control': 'no-store',
+      'retry-after': String(retryAfterSeconds),
+    });
+    response.end(`${JSON.stringify({
+      error: 'ROUTE_ASSISTANT_RATE_LIMITED',
+      retryAfterSeconds,
+    })}\n`);
+    return false;
+  }
+
+  nextRouteAssistantAllowedAt = now + routeAssistantCooldownMs;
+  return true;
+}
+
 async function handleApi(request, response, url) {
   if (request.method === 'POST' && url.pathname === '/api/route-assistant') {
     if (!openaiToken) {
       sendJson(response, 503, { error: 'OPENAI_NOT_CONFIGURED' });
       return;
     }
+
+    if (!checkRouteAssistantRateLimit(response)) return;
 
     const body = await readJsonBody(request);
     const instruction = typeof body.instruction === 'string' ? body.instruction.trim() : '';

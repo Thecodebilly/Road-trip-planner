@@ -891,6 +891,18 @@ async function requestRouteAssistant(
   });
 
   if (!response.ok) {
+    if (response.status === 429) {
+      let retryAfterSeconds = Number(response.headers.get('retry-after'));
+      try {
+        const payload = await response.json();
+        retryAfterSeconds = Number(payload.retryAfterSeconds) || retryAfterSeconds;
+      } catch {
+        // Keep the Retry-After header fallback.
+      }
+
+      throw new Error(`ROUTE_ASSISTANT_RATE_LIMITED_${Math.max(1, Math.ceil(retryAfterSeconds || 30))}`);
+    }
+
     throw new Error(`ROUTE_ASSISTANT_${response.status}`);
   }
 
@@ -3146,7 +3158,9 @@ function App() {
     } catch (error) {
       const message = error instanceof Error && error.message.includes('503')
         ? 'AI route editor needs OPENAI_TOKEN on the server.'
-        : 'AI route edit failed. Try a smaller change.';
+        : error instanceof Error && error.message.startsWith('ROUTE_ASSISTANT_RATE_LIMITED_')
+          ? `AI route editor is cooling down. Try again in ${error.message.split('_').pop()} seconds.`
+          : 'AI route edit failed. Try a smaller change.';
       setRouteAssistantMessage(message);
     } finally {
       setIsRouteAssistantWorking(false);
