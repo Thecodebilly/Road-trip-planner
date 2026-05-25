@@ -772,14 +772,109 @@ function enforceRouteAssistantLocks(originalTrip, proposedTrip, instruction) {
   }) || proposedTrip;
 }
 
+function getRouteAssistantTripInput(trip) {
+  return {
+    id: trip.id,
+    workspaceId: trip.workspaceId,
+    name: trip.name,
+    notes: trip.notes,
+    createdAt: trip.createdAt,
+    updatedAt: trip.updatedAt,
+    stops: trip.stops,
+  };
+}
+
 function extractOpenAIText(payload) {
   if (typeof payload?.output_text === 'string') return payload.output_text;
 
   return (payload?.output || [])
     .flatMap((item) => item?.content || [])
-    .filter((content) => content?.type === 'output_text' && typeof content.text === 'string')
-    .map((content) => content.text)
+    .map((content) => {
+      if (typeof content?.text === 'string') return content.text;
+      if (typeof content?.json === 'object') return JSON.stringify(content.json);
+      if (typeof content?.parsed === 'object') return JSON.stringify(content.parsed);
+      return '';
+    })
+    .filter(Boolean)
     .join('\n');
+}
+
+function parseRouteProposalText(outputText) {
+  if (!outputText) return null;
+
+  const trimmed = outputText.trim();
+  const fencedMatch = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  const candidate = fencedMatch ? fencedMatch[1].trim() : trimmed;
+
+  try {
+    return JSON.parse(candidate);
+  } catch {
+    const firstBrace = candidate.indexOf('{');
+    const lastBrace = candidate.lastIndexOf('}');
+    if (firstBrace === -1 || lastBrace <= firstBrace) return null;
+
+    try {
+      return JSON.parse(candidate.slice(firstBrace, lastBrace + 1));
+    } catch {
+      return null;
+    }
+  }
+}
+
+function normalizeRouteProposal(proposal, originalTrip) {
+  if (!proposal || typeof proposal !== 'object') return null;
+
+  const rawTrip = Array.isArray(proposal.trip)
+    ? { stops: proposal.trip }
+    : proposal.trip && typeof proposal.trip === 'object'
+      ? proposal.trip
+      : Array.isArray(proposal.stops)
+        ? { stops: proposal.stops }
+        : null;
+
+  if (!rawTrip) return null;
+
+  const proposedTrip = normalizeTrip({
+    ...originalTrip,
+    ...rawTrip,
+    id: typeof rawTrip.id === 'string' && rawTrip.id ? rawTrip.id : originalTrip.id,
+    workspaceId: originalTrip.workspaceId,
+    name:
+      typeof rawTrip.name === 'string' && rawTrip.name.trim()
+        ? rawTrip.name
+        : originalTrip.name,
+    notes: typeof rawTrip.notes === 'string' ? rawTrip.notes : originalTrip.notes,
+    documents: originalTrip.documents,
+    createdAt:
+      typeof rawTrip.createdAt === 'string' && rawTrip.createdAt
+        ? rawTrip.createdAt
+        : originalTrip.createdAt,
+    updatedAt:
+      typeof rawTrip.updatedAt === 'string' && rawTrip.updatedAt
+        ? rawTrip.updatedAt
+        : new Date().toISOString(),
+  });
+
+  if (!proposedTrip) return null;
+
+  return {
+    summary:
+      typeof proposal.summary === 'string' && proposal.summary.trim()
+        ? proposal.summary.trim()
+        : 'Draft route updated.',
+    trip: proposedTrip,
+  };
+}
+
+function logInvalidRouteAssistantResponse(payload, outputText) {
+  console.error(
+    'OpenAI route assistant returned invalid structured output:',
+    JSON.stringify({
+      status: payload?.status,
+      incomplete_details: payload?.incomplete_details,
+      outputTextPreview: typeof outputText === 'string' ? outputText.slice(0, 1000) : '',
+    }),
+  );
 }
 
 function readJsonBody(request) {
@@ -870,9 +965,9 @@ async function handleApi(request, response, url) {
           instruction,
           lockedAnchors,
           drivingPlanningContext,
-          trip,
+          trip: getRouteAssistantTripInput(trip),
         }),
-        max_output_tokens: 12000,
+        max_output_tokens: 16000,
         text: {
           format: {
             type: 'json_schema',
@@ -893,20 +988,15 @@ async function handleApi(request, response, url) {
 
     const payload = await openaiResponse.json();
     const outputText = extractOpenAIText(payload);
-    let proposal = null;
-    try {
-      proposal = outputText ? JSON.parse(outputText) : null;
-    } catch {
-      proposal = null;
-    }
-    const proposedTrip = normalizeTrip(proposal?.trip);
+    const proposal = normalizeRouteProposal(parseRouteProposalText(outputText), trip);
 
-    if (!proposal || typeof proposal.summary !== 'string' || !proposedTrip) {
+    if (!proposal) {
+      logInvalidRouteAssistantResponse(payload, outputText);
       sendJson(response, 502, { error: 'INVALID_OPENAI_RESPONSE' });
       return;
     }
 
-    const anchoredTrip = enforceRouteAssistantLocks(trip, proposedTrip, instruction);
+    const anchoredTrip = enforceRouteAssistantLocks(trip, proposal.trip, instruction);
     const travelSummary = instructionAllowsNonCarTravel(instruction, trip)
       ? 'Car-first planning stayed on, with requested non-car legs allowed.'
       : 'Planned for passenger-car driving.';
