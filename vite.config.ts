@@ -8,6 +8,15 @@ const railwayAllowedHosts = [
 
 export default defineConfig({
   plugins: [react()],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          leaflet: ['leaflet'],
+        },
+      },
+    },
+  },
   server: {
     host: '0.0.0.0',
     port: Number(process.env.PORT) || 5173,

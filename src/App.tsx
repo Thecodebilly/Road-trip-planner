@@ -9,6 +9,7 @@ import {
   type Libraries,
   useLoadScript,
 } from '@react-google-maps/api';
+import L from 'leaflet';
 import {
   BedDouble,
   CalendarDays,
@@ -188,6 +189,14 @@ type SharedTripResponse = {
 
 type SaveBackend = 'checking' | 'database' | 'local';
 type AppView = 'editor' | 'saved';
+type NewTripMode = 'setup' | 'json';
+
+type NewTripDraft = {
+  startDate: string;
+  endDate: string;
+  startLocation: string;
+  endLocation: string;
+};
 
 type RouteAssistantResult = {
   summary: string;
@@ -268,9 +277,11 @@ const maxHotelCandidates = 12;
 const hotelSearchRadiusMeters = 16093;
 const routeCacheTtlMs = 7 * 24 * 60 * 60 * 1000;
 const hotelCacheTtlMs = 24 * 60 * 60 * 1000;
+const routeQuotaCooldownMs = 24 * 60 * 60 * 1000;
 const maxRouteCacheEntries = 12;
 const maxHotelCacheEntries = 80;
 const maxDocumentFileBytes = 1024 * 1024;
+const routeQuotaExhaustedUntilKey = 'road-trip-planner.routeQuotaExhaustedUntil.v1';
 const defaultGasPrice = 3.5;
 const defaultFuelMpg = 25;
 const defaultMaxCarLegHours = 14;
@@ -595,6 +606,15 @@ function createBlankTrip(workspaceId = defaultWorkspaceId, name = 'Untitled trip
     documents: [],
     createdAt: now,
     updatedAt: now,
+  };
+}
+
+function createEmptyNewTripDraft(): NewTripDraft {
+  return {
+    startDate: '',
+    endDate: '',
+    startLocation: '',
+    endLocation: '',
   };
 }
 
@@ -1058,8 +1078,33 @@ function createEncodedTripShareUrl(trip: Trip) {
   return url.toString();
 }
 
-function createShortTripShareUrl(shareId: string) {
-  return new URL(`${sharePathPrefix}${encodeURIComponent(shareId)}`, window.location.origin).toString();
+function createNamedUrlToken(name: string, id: string) {
+  return `${sanitizeFileName(name).slice(0, 64)}-${id}`;
+}
+
+function savedRouteTokenMatchesId(token: string, tripId: string) {
+  return token === tripId || token.endsWith(`-${tripId}`);
+}
+
+function extractShareIdFromToken(token: string) {
+  const value = token.trim();
+  if (/^[a-f0-9]{10,20}$/i.test(value)) return value;
+
+  return value.match(/(?:^|[-_])([a-f0-9]{10,20})$/i)?.[1] || value;
+}
+
+function safeDecodeUrlPart(value: string) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return '';
+  }
+}
+
+function createShortTripShareUrl(shareId: string, tripName: string) {
+  const namedToken = createNamedUrlToken(tripName, shareId);
+
+  return new URL(`${sharePathPrefix}${encodeURIComponent(namedToken)}`, window.location.origin).toString();
 }
 
 async function createServerTripShare(trip: Trip) {
@@ -1104,7 +1149,7 @@ function getSavedRouteIdFromUrl() {
   return new URLSearchParams(window.location.search).get(savedRouteParam) || '';
 }
 
-function setSavedRouteUrl(tripId: string, replace = false) {
+function setSavedRouteUrl(trip: Pick<Trip, 'id' | 'name'>, replace = false) {
   const url = new URL(window.location.href);
   const hashParams = new URLSearchParams(url.hash.replace(/^#/, ''));
 
@@ -1112,7 +1157,7 @@ function setSavedRouteUrl(tripId: string, replace = false) {
     hashParams.delete(param);
     url.searchParams.delete(param);
   });
-  hashParams.set(savedRouteParam, tripId);
+  hashParams.set(savedRouteParam, createNamedUrlToken(trip.name, trip.id));
   url.searchParams.delete(savedRouteParam);
 
   const nextHash = hashParams.toString();
@@ -1158,16 +1203,16 @@ function clearSavedRouteUrl(replace = false) {
 function getTripShareSourceFromUrl(): TripShareSource | null {
   const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
   const hashShare = hashParams.get(shortTripShareParam);
-  if (hashShare) return { kind: 'server', id: hashShare };
+  if (hashShare) return { kind: 'server', id: extractShareIdFromToken(hashShare) };
 
   const pathShare = window.location.pathname.startsWith(sharePathPrefix)
-    ? decodeURIComponent(window.location.pathname.slice(sharePathPrefix.length).split('/')[0] || '')
+    ? safeDecodeUrlPart(window.location.pathname.slice(sharePathPrefix.length).split('/')[0] || '')
     : '';
-  if (pathShare) return { kind: 'server', id: pathShare };
+  if (pathShare) return { kind: 'server', id: extractShareIdFromToken(pathShare) };
 
   const searchParams = new URLSearchParams(window.location.search);
   const queryShare = searchParams.get(shortTripShareParam);
-  if (queryShare) return { kind: 'server', id: queryShare };
+  if (queryShare) return { kind: 'server', id: extractShareIdFromToken(queryShare) };
 
   const compactPayload = hashParams.get(compactTripShareParam) || searchParams.get(compactTripShareParam);
   if (compactPayload) return { kind: 'payload', payload: compactPayload };
@@ -1260,6 +1305,61 @@ function sanitizeFileName(value: string) {
     .replace(/^-+|-+$/g, '');
 
   return fileName || 'road-trip';
+}
+
+function parseLocationCoordinates(value: string): google.maps.LatLngLiteral | null {
+  const match = value.trim().match(/^(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)$/);
+  if (!match) return null;
+
+  const lat = Number(match[1]);
+  const lng = Number(match[2]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+
+  return { lat, lng };
+}
+
+async function resolveNewTripLocation(
+  label: string,
+  fallbackPosition: google.maps.LatLngLiteral,
+) {
+  const trimmedLabel = label.trim();
+  const coordinatePosition = parseLocationCoordinates(trimmedLabel);
+  if (coordinatePosition) {
+    return {
+      label: trimmedLabel,
+      position: coordinatePosition,
+      resolved: true,
+    };
+  }
+
+  if (typeof google === 'undefined' || !google.maps?.Geocoder) {
+    return {
+      label: trimmedLabel,
+      position: fallbackPosition,
+      resolved: false,
+    };
+  }
+
+  try {
+    const geocoder = new google.maps.Geocoder();
+    const result = await geocoder.geocode({ address: trimmedLabel });
+    const location = result.results[0]?.geometry?.location;
+
+    if (!location) throw new Error('NO_GEOCODE_RESULT');
+
+    return {
+      label: trimmedLabel,
+      position: roundPosition({ lat: location.lat(), lng: location.lng() }, 6),
+      resolved: true,
+    };
+  } catch {
+    return {
+      label: trimmedLabel,
+      position: fallbackPosition,
+      resolved: false,
+    };
+  }
 }
 
 function downloadTripExport(trip: Trip) {
@@ -2283,15 +2383,41 @@ async function requestRoadRoute(routeLibrary: RoadRoutesLibrary, stops: TripStop
   return route;
 }
 
+async function requestRoadRoutes(routeLibrary: RoadRoutesLibrary, routeChunks: TripStop[][]) {
+  const routes: RoadRoute[] = [];
+
+  for (const chunk of routeChunks) {
+    routes.push(await requestRoadRoute(routeLibrary, chunk));
+  }
+
+  return routes;
+}
+
 function isRouteQuotaError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
-  return /RESOURCE_EXHAUSTED|quota/i.test(message);
+  return /RESOURCE_EXHAUSTED|RATE_LIMIT_EXCEEDED|ComputeRoutesRequestsPerDay|quota/i.test(message);
+}
+
+function hasRememberedRouteQuotaExhaustion() {
+  const quotaExhaustedUntil = readNumberStorage(routeQuotaExhaustedUntilKey, 0);
+
+  if (quotaExhaustedUntil > Date.now()) return true;
+  if (quotaExhaustedUntil) removeStorage(routeQuotaExhaustedUntilKey);
+  return false;
+}
+
+function rememberRouteQuotaExhaustion() {
+  writeStorage(routeQuotaExhaustedUntilKey, Date.now() + routeQuotaCooldownMs);
+}
+
+function getRouteQuotaFallbackMessage() {
+  return 'Routes API daily quota reached; using estimated path without more API calls.';
 }
 
 function formatRouteFallbackMessage(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
 
-  if (isRouteQuotaError(error)) return 'Routes API daily quota reached';
+  if (isRouteQuotaError(error)) return getRouteQuotaFallbackMessage();
   if (message.includes('ROUTES_LIBRARY_UNAVAILABLE')) return 'Routes library unavailable';
   return 'Driving route unavailable';
 }
@@ -2308,6 +2434,7 @@ function App() {
   const documentInputRef = useRef<HTMLInputElement | null>(null);
   const documentUploadStopIdRef = useRef('');
   const shareImportHandledRef = useRef(false);
+  const savedRouteUrlIdRef = useRef(getSavedRouteIdFromUrl());
   const initialWorkspaceSnapshotRef = useRef<ReturnType<typeof getInitialWorkspaceSnapshot> | null>(null);
   if (!initialWorkspaceSnapshotRef.current) {
     initialWorkspaceSnapshotRef.current = getInitialWorkspaceSnapshot();
@@ -2334,6 +2461,10 @@ function App() {
   const [isRouteAssistantWorking, setIsRouteAssistantWorking] = useState(false);
   const [importJsonText, setImportJsonText] = useState('');
   const [showImportModal, setShowImportModal] = useState(false);
+  const [showNewTripModal, setShowNewTripModal] = useState(false);
+  const [newTripMode, setNewTripMode] = useState<NewTripMode>('setup');
+  const [newTripDraft, setNewTripDraft] = useState<NewTripDraft>(() => createEmptyNewTripDraft());
+  const [isCreatingNewTrip, setIsCreatingNewTrip] = useState(false);
   const [saveBackend, setSaveBackend] = useState<SaveBackend>('checking');
   const [isSaving, setIsSaving] = useState(false);
   const [isSharing, setIsSharing] = useState(false);
@@ -2521,6 +2652,19 @@ function App() {
     window.addEventListener('keydown', closeOnEscape);
     return () => window.removeEventListener('keydown', closeOnEscape);
   }, [showImportModal]);
+
+  useEffect(() => {
+    if (!showNewTripModal) return undefined;
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setShowNewTripModal(false);
+      }
+    };
+
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [showNewTripModal]);
 
   useEffect(() => {
     if (!stops.length) {
@@ -2878,7 +3022,7 @@ function App() {
     setIsSharing(true);
     try {
       const shareId = await createServerTripShare(normalizedTrip);
-      await copyText(createShortTripShareUrl(shareId));
+      await copyText(createShortTripShareUrl(shareId, normalizedTrip.name));
       setSaveMessage(`Short share link copied: ${normalizedTrip.name}`);
     } catch {
       try {
@@ -2918,6 +3062,8 @@ function App() {
       setFitSignal((value) => value + 1);
       if (closeModal) {
         setShowImportModal(false);
+        setShowNewTripModal(false);
+        setNewTripMode('setup');
         setImportJsonText('');
       }
 
@@ -3019,7 +3165,7 @@ function App() {
 
     setActiveTrip(tripToSave);
     setSavedTrips(nextSavedTrips);
-    setSavedRouteUrl(tripToSave.id, true);
+    setSavedRouteUrl(tripToSave, true);
     setIsSaving(true);
 
     try {
@@ -3044,16 +3190,94 @@ function App() {
   };
 
   const startNewTrip = () => {
-    const newTrip = createBlankTrip(activeWorkspaceId);
-    setDrivingMiles(null);
-    setRoadDriveEstimates(null);
-    setActiveTrip(newTrip);
-    setSelectedStopId(newTrip.stops[0].id);
-    setSelectedDocumentId(null);
-    setCurrentView('editor');
-    setSaveMessage('');
-    clearSavedRouteUrl();
-    setFitSignal((value) => value + 1);
+    setNewTripDraft(createEmptyNewTripDraft());
+    setImportJsonText('');
+    setNewTripMode('setup');
+    setShowNewTripModal(true);
+  };
+
+  const updateNewTripDraft = (field: keyof NewTripDraft, value: string) => {
+    setNewTripDraft((draft) => ({ ...draft, [field]: value }));
+  };
+
+  const createNewTripFromDraft = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    const startDate = newTripDraft.startDate;
+    const endDate = newTripDraft.endDate;
+    const startLocation = newTripDraft.startLocation.trim();
+    const endLocation = newTripDraft.endLocation.trim();
+    if (!startDate || !endDate || !startLocation || !endLocation) return;
+    if (endDate < startDate) {
+      setSaveMessage('End date must be on or after start date');
+      return;
+    }
+
+    setIsCreatingNewTrip(true);
+    try {
+      const startFallback = usCenter;
+      const endFallback = { lat: usCenter.lat, lng: usCenter.lng + 1 };
+      const [start, end] = await Promise.all([
+        resolveNewTripLocation(startLocation, startFallback),
+        resolveNewTripLocation(endLocation, endFallback),
+      ]);
+      const now = new Date().toISOString();
+      const newTrip: Trip = {
+        id: makeId('trip'),
+        workspaceId: activeWorkspaceId,
+        name: `${start.label} to ${end.label}`,
+        notes: '',
+        stops: [
+          {
+            id: makeId('stop'),
+            order: 1,
+            date: startDate,
+            label: start.label,
+            lat: start.position.lat,
+            lng: start.position.lng,
+            notes: '',
+            remoteWork: false,
+            sleepingArrangement: 'camping',
+            friendName: '',
+            travelMode: 'car',
+          },
+          {
+            id: makeId('stop'),
+            order: 2,
+            date: endDate,
+            label: end.label,
+            lat: end.position.lat,
+            lng: end.position.lng,
+            notes: '',
+            remoteWork: false,
+            sleepingArrangement: 'camping',
+            friendName: '',
+            travelMode: 'car',
+          },
+        ],
+        documents: [],
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      setDrivingMiles(null);
+      setRoadDriveEstimates(null);
+      setActiveTrip(newTrip);
+      setSelectedStopId(newTrip.stops[0].id);
+      setSelectedDocumentId(null);
+      setCurrentView('editor');
+      setSaveMessage(
+        start.resolved && end.resolved
+          ? 'New trip started'
+          : 'New trip started; review map coordinates for unresolved locations',
+      );
+      setShowNewTripModal(false);
+      setNewTripDraft(createEmptyNewTripDraft());
+      clearSavedRouteUrl();
+      setFitSignal((value) => value + 1);
+    } finally {
+      setIsCreatingNewTrip(false);
+    }
   };
 
   const loadTrip = (trip: Trip, options: { syncUrl?: boolean } = {}) => {
@@ -3069,19 +3293,27 @@ function App() {
     setCurrentView('editor');
     setSaveMessage(`Loaded ${nextTrip.name}`);
     if (syncUrl) {
-      setSavedRouteUrl(nextTrip.id);
+      setSavedRouteUrl(nextTrip);
     }
     setFitSignal((value) => value + 1);
   };
 
   useEffect(() => {
-    const loadSavedRouteFromUrl = () => {
+    const loadSavedRouteFromUrl = (event?: Event) => {
       if (getTripShareSourceFromUrl()) return;
 
-      const routeId = getSavedRouteIdFromUrl();
-      if (!routeId) return;
+      const routeToken = getSavedRouteIdFromUrl();
+      const previousRouteToken = savedRouteUrlIdRef.current;
+      savedRouteUrlIdRef.current = routeToken;
 
-      const savedRoute = savedTrips.find((trip) => trip.id === routeId);
+      if (!routeToken) {
+        if (previousRouteToken && event) {
+          setCurrentView('saved');
+        }
+        return;
+      }
+
+      const savedRoute = savedTrips.find((trip) => savedRouteTokenMatchesId(routeToken, trip.id));
       if (savedRoute) {
         if (activeTrip.id !== savedRoute.id || currentView !== 'editor') {
           loadTrip(savedRoute, { syncUrl: false });
@@ -3104,10 +3336,15 @@ function App() {
     };
   }, [activeTrip.id, currentView, saveBackend, savedTrips]);
 
+  const openSavedTrips = () => {
+    clearSavedRouteUrl();
+    setCurrentView('saved');
+  };
+
   const removeSavedTrip = async (tripId: string) => {
     const nextSavedTrips = savedTrips.filter((trip) => trip.id !== tripId);
     setSavedTrips(nextSavedTrips);
-    if (getSavedRouteIdFromUrl() === tripId) {
+    if (savedRouteTokenMatchesId(getSavedRouteIdFromUrl(), tripId)) {
       clearSavedRouteUrl(true);
     }
 
@@ -3256,7 +3493,7 @@ function App() {
           <button
             type="button"
             className={currentView === 'saved' ? 'view-tab active' : 'view-tab'}
-            onClick={() => setCurrentView('saved')}
+            onClick={openSavedTrips}
           >
             Saved trips
             <span>{savedTrips.length}</span>
@@ -3680,13 +3917,19 @@ function App() {
               onDriveEstimatesChange={setRoadDriveEstimates}
             />
           ) : (
-            <div className="map-state">
-              <MapPin size={32} />
-              <h2>Map key missing</h2>
-              <p>
-                Add <code>VITE_GOOGLE_MAPS_API_KEY</code> to enable the route map.
-              </p>
-            </div>
+            <OpenStreetMapCanvas
+              apiKey=""
+              stops={stops}
+              selectedStopId={selectedStopId}
+              fitSignal={fitSignal}
+              isPlacingPin={isPlacingPin}
+              showHotelFinder={showHotelFinder}
+              onSelectStop={setSelectedStopId}
+              onPlacePin={placePin}
+              onRouteDistanceChange={setDrivingMiles}
+              onDriveEstimatesChange={setRoadDriveEstimates}
+              reason="Google Maps key missing; OpenStreetMap fallback active"
+            />
           )}
         </section>
 
@@ -4070,6 +4313,151 @@ function App() {
         </main>
       )}
 
+      {showNewTripModal && (
+        <div className="json-modal-backdrop" role="presentation" onClick={() => setShowNewTripModal(false)}>
+          <section
+            className="json-modal new-trip-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="new-trip-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="json-modal-header">
+              <span>
+                <h2 id="new-trip-title">New Trip</h2>
+                <p>{activeWorkspace.name}</p>
+              </span>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => setShowNewTripModal(false)}
+                title="Close new trip"
+                aria-label="Close new trip"
+              >
+                <X size={18} />
+              </button>
+            </header>
+
+            <div className="new-trip-mode-tabs" role="tablist" aria-label="New trip source">
+              <button
+                type="button"
+                role="tab"
+                aria-selected={newTripMode === 'setup'}
+                className={newTripMode === 'setup' ? 'secondary-button active' : 'secondary-button'}
+                onClick={() => setNewTripMode('setup')}
+              >
+                <Route size={17} />
+                <span>Route</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
+                aria-selected={newTripMode === 'json'}
+                className={newTripMode === 'json' ? 'secondary-button active' : 'secondary-button'}
+                onClick={() => setNewTripMode('json')}
+              >
+                <Import size={17} />
+                <span>JSON</span>
+              </button>
+            </div>
+
+            {newTripMode === 'setup' ? (
+              <form className="new-trip-setup-form" onSubmit={createNewTripFromDraft}>
+                <div className="new-trip-field-grid">
+                  <span>
+                    <label htmlFor="new-trip-start-date">Start date</label>
+                    <input
+                      id="new-trip-start-date"
+                      type="date"
+                      value={newTripDraft.startDate}
+                      onChange={(event) => updateNewTripDraft('startDate', event.currentTarget.value)}
+                      required
+                    />
+                  </span>
+                  <span>
+                    <label htmlFor="new-trip-end-date">End date</label>
+                    <input
+                      id="new-trip-end-date"
+                      type="date"
+                      min={newTripDraft.startDate || undefined}
+                      value={newTripDraft.endDate}
+                      onChange={(event) => updateNewTripDraft('endDate', event.currentTarget.value)}
+                      required
+                    />
+                  </span>
+                  <span>
+                    <label htmlFor="new-trip-start-location">Start location</label>
+                    <input
+                      id="new-trip-start-location"
+                      type="text"
+                      value={newTripDraft.startLocation}
+                      onChange={(event) => updateNewTripDraft('startLocation', event.currentTarget.value)}
+                      placeholder="Jacksonville, FL"
+                      required
+                    />
+                  </span>
+                  <span>
+                    <label htmlFor="new-trip-end-location">End location</label>
+                    <input
+                      id="new-trip-end-location"
+                      type="text"
+                      value={newTripDraft.endLocation}
+                      onChange={(event) => updateNewTripDraft('endLocation', event.currentTarget.value)}
+                      placeholder="Winston-Salem, NC"
+                      required
+                    />
+                  </span>
+                </div>
+                <footer className="json-modal-actions">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => setShowNewTripModal(false)}
+                    disabled={isCreatingNewTrip}
+                  >
+                    <X size={17} />
+                    <span>Cancel</span>
+                  </button>
+                  <button type="submit" className="primary-button" disabled={isCreatingNewTrip}>
+                    <FilePlus2 size={17} />
+                    <span>{isCreatingNewTrip ? 'Creating' : 'Create trip'}</span>
+                  </button>
+                </footer>
+              </form>
+            ) : (
+              <form className="import-form new-trip-import-form" onSubmit={importPastedTrip}>
+                <label htmlFor="new-trip-import-json">Saved trip JSON</label>
+                <textarea
+                  id="new-trip-import-json"
+                  value={importJsonText}
+                  onChange={(event) => setImportJsonText(event.currentTarget.value)}
+                  placeholder={exportFormatExample}
+                  rows={12}
+                />
+                <footer className="json-modal-actions">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => setShowNewTripModal(false)}
+                  >
+                    <X size={17} />
+                    <span>Cancel</span>
+                  </button>
+                  <button
+                    type="submit"
+                    className="primary-button"
+                    disabled={isImporting || !importJsonText.trim()}
+                  >
+                    <Import size={17} />
+                    <span>{isImporting ? 'Importing' : 'Import JSON'}</span>
+                  </button>
+                </footer>
+              </form>
+            )}
+          </section>
+        </div>
+      )}
+
       {previewExport && (
         <div className="json-modal-backdrop" role="presentation" onClick={() => setPreviewExport(null)}>
           <section
@@ -4174,6 +4562,202 @@ function App() {
   );
 }
 
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function createOpenMapStopIcon(group: MapStopGroup, selected: boolean) {
+  const markerLabel = group.stopRangeLabel || String(group.stops[0].order);
+  const className = [
+    'map-stop-marker',
+    getSleepClass(group.sleepingArrangement),
+    group.stops.length > 1 ? 'grouped' : '',
+    group.hasRemoteWork ? 'remote' : '',
+    group.hasWeekend ? 'weekend' : '',
+    selected ? 'selected' : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
+
+  return L.divIcon({
+    className: 'open-map-stop-icon',
+    html: `<span class="${className}">${escapeHtml(markerLabel)}</span>`,
+    iconAnchor: [18, 18],
+    iconSize: [36, 36],
+    popupAnchor: [0, -18],
+  });
+}
+
+function createOpenMapPopupHtml(group: MapStopGroup) {
+  const labels = escapeHtml(group.stops.map((stop) => stop.label).join(', '));
+  const dateRange = escapeHtml(group.dateRangeLabel || 'No dates');
+  const notes = escapeHtml(group.stops[0]?.notes || 'No notes yet.');
+
+  return `
+    <div class="map-info open-map-popup">
+      <strong>${labels}</strong>
+      <small>${dateRange}</small>
+      <p>${notes}</p>
+    </div>
+  `;
+}
+
+function OpenStreetMapCanvas({
+  fitSignal,
+  isPlacingPin,
+  onDriveEstimatesChange,
+  onPlacePin,
+  onRouteDistanceChange,
+  onSelectStop,
+  selectedStopId,
+  showHotelFinder,
+  stops,
+  reason,
+}: MapCanvasProps & { reason: string }) {
+  const mapElementRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<L.Map | null>(null);
+  const markerLayerRef = useRef<L.LayerGroup | null>(null);
+  const routeLayerRef = useRef<L.Polyline | null>(null);
+  const isPlacingPinRef = useRef(isPlacingPin);
+  const onPlacePinRef = useRef(onPlacePin);
+  const onSelectStopRef = useRef(onSelectStop);
+  const selectedStop = useMemo(
+    () => stops.find((stop) => stop.id === selectedStopId) || null,
+    [selectedStopId, stops],
+  );
+  const mapStopGroups = useMemo(() => groupMapStops(stops), [stops]);
+  const path = useMemo(() => stops.map((stop) => [stop.lat, stop.lng] as [number, number]), [stops]);
+  const routeKey = useMemo(() => buildRouteCacheKey(stops), [stops]);
+  const mapCenter = useMemo(
+    () =>
+      [
+        selectedStop?.lat || stops[0]?.lat || usCenter.lat,
+        selectedStop?.lng || stops[0]?.lng || usCenter.lng,
+      ] as [number, number],
+    [selectedStop, stops],
+  );
+
+  useEffect(() => {
+    isPlacingPinRef.current = isPlacingPin;
+  }, [isPlacingPin]);
+
+  useEffect(() => {
+    onPlacePinRef.current = onPlacePin;
+  }, [onPlacePin]);
+
+  useEffect(() => {
+    onSelectStopRef.current = onSelectStop;
+  }, [onSelectStop]);
+
+  useEffect(() => {
+    onRouteDistanceChange(null);
+    onDriveEstimatesChange(null);
+  }, [onDriveEstimatesChange, onRouteDistanceChange, routeKey]);
+
+  useEffect(() => {
+    if (!mapElementRef.current || mapRef.current) return undefined;
+
+    const map = L.map(mapElementRef.current, {
+      zoomControl: true,
+    }).setView(mapCenter, 4);
+    const handleMapClick = (event: L.LeafletMouseEvent) => {
+      if (!isPlacingPinRef.current) return;
+
+      onPlacePinRef.current({
+        lat: event.latlng.lat,
+        lng: event.latlng.lng,
+      });
+    };
+
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    }).addTo(map);
+    markerLayerRef.current = L.layerGroup().addTo(map);
+    map.on('click', handleMapClick);
+    mapRef.current = map;
+    window.setTimeout(() => map.invalidateSize(), 0);
+
+    return () => {
+      map.off('click', handleMapClick);
+      map.remove();
+      mapRef.current = null;
+      markerLayerRef.current = null;
+      routeLayerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    const markerLayer = markerLayerRef.current;
+    if (!map || !markerLayer) return;
+
+    markerLayer.clearLayers();
+    routeLayerRef.current?.remove();
+    routeLayerRef.current = path.length > 1
+      ? L.polyline(path, {
+          color: '#0f766e',
+          opacity: 0.95,
+          weight: 4,
+        }).addTo(map)
+      : null;
+
+    const selectedMarkers: L.Marker[] = [];
+    mapStopGroups.forEach((group) => {
+      const selectedInGroup = group.stops.some((stop) => stop.id === selectedStopId);
+      const marker = L.marker([group.position.lat, group.position.lng], {
+        icon: createOpenMapStopIcon(group, selectedInGroup),
+        title: group.stops.map((stop) => stop.label).join(', '),
+      })
+        .bindPopup(createOpenMapPopupHtml(group))
+        .on('click', () => onSelectStopRef.current(group.stops[0]?.id || null));
+
+      markerLayer.addLayer(marker);
+      if (selectedInGroup) {
+        selectedMarkers.push(marker);
+      }
+    });
+
+    selectedMarkers[0]?.openPopup();
+  }, [mapStopGroups, path, selectedStopId]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !stops.length) return;
+
+    const positions = stops.map((stop) => [stop.lat, stop.lng] as [number, number]);
+    if (positions.length === 1) {
+      map.setView(positions[0], 6);
+      return;
+    }
+
+    map.fitBounds(L.latLngBounds(positions), { padding: [72, 72] });
+  }, [fitSignal, stops]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !selectedStop) return;
+
+    map.panTo([selectedStop.lat, selectedStop.lng]);
+  }, [selectedStop]);
+
+  return (
+    <>
+      <div ref={mapElementRef} className="open-map" />
+      {showHotelFinder && (
+        <div className="hotel-status error">Hotel finder needs Google Places; unavailable in OpenStreetMap fallback.</div>
+      )}
+      <div className="route-status warning">
+        <span>{reason}; using estimated path.</span>
+      </div>
+    </>
+  );
+}
+
 function MapCanvas({
   apiKey,
   stops,
@@ -4191,7 +4775,7 @@ function MapCanvas({
   const [routeStatus, setRouteStatus] = useState<'idle' | 'loading' | 'ready' | 'fallback'>('idle');
   const [routeError, setRouteError] = useState('');
   const [routeNoticeDismissed, setRouteNoticeDismissed] = useState(false);
-  const [routeQuotaExhausted, setRouteQuotaExhausted] = useState(false);
+  const [routeQuotaExhausted, setRouteQuotaExhausted] = useState(() => hasRememberedRouteQuotaExhaustion());
   const [routePaths, setRoutePaths] = useState<google.maps.LatLngLiteral[][]>([]);
   const [routeHotelSearchPoints, setRouteHotelSearchPoints] = useState<HotelSearchPoint[]>([]);
   const [hotelCandidates, setHotelCandidates] = useState<HotelCandidate[]>([]);
@@ -4282,11 +4866,19 @@ function MapCanvas({
       return undefined;
     }
 
-    if (routeQuotaExhausted) {
+    const rememberedRouteQuotaExhaustion = hasRememberedRouteQuotaExhaustion();
+    if (routeQuotaExhausted && !rememberedRouteQuotaExhaustion) {
+      setRouteQuotaExhausted(false);
+    }
+
+    if (rememberedRouteQuotaExhaustion) {
+      if (!routeQuotaExhausted) {
+        setRouteQuotaExhausted(true);
+      }
       setRoutePaths([]);
       setRouteHotelSearchPoints([]);
       setRouteStatus('fallback');
-      setRouteError('Routes API daily quota reached');
+      setRouteError(getRouteQuotaFallbackMessage());
       onRouteDistanceChange(null);
       onDriveEstimatesChange(null);
       return undefined;
@@ -4310,7 +4902,7 @@ function MapCanvas({
             throw new Error('ROUTES_LIBRARY_UNAVAILABLE');
           }
 
-          return Promise.all(routeChunks.map((chunk) => requestRoadRoute(routeLibrary, chunk)));
+          return requestRoadRoutes(routeLibrary, routeChunks);
         })
         .then((routes) => {
           if (canceled) return;
@@ -4341,6 +4933,7 @@ function MapCanvas({
           setRouteStatus('fallback');
           setRouteError(formatRouteFallbackMessage(error));
           if (isRouteQuotaError(error)) {
+            rememberRouteQuotaExhaustion();
             setRouteQuotaExhausted(true);
           }
           setRouteNoticeDismissed(false);
@@ -4470,11 +5063,19 @@ function MapCanvas({
 
   if (loadError) {
     return (
-      <div className="map-state error">
-        <MapPin size={32} />
-        <h2>Map unavailable</h2>
-        <p>Please verify the Google Maps API key, billing, and allowed referrers.</p>
-      </div>
+      <OpenStreetMapCanvas
+        apiKey={apiKey}
+        stops={stops}
+        selectedStopId={selectedStopId}
+        fitSignal={fitSignal}
+        isPlacingPin={isPlacingPin}
+        showHotelFinder={showHotelFinder}
+        onSelectStop={onSelectStop}
+        onPlacePin={onPlacePin}
+        onRouteDistanceChange={onRouteDistanceChange}
+        onDriveEstimatesChange={onDriveEstimatesChange}
+        reason="Google Maps unavailable; OpenStreetMap fallback active"
+      />
     );
   }
 

@@ -296,6 +296,15 @@ function isShareId(value) {
   return typeof value === 'string' && /^[a-f0-9]{10,20}$/i.test(value);
 }
 
+function extractShareId(value) {
+  if (typeof value !== 'string') return '';
+
+  const trimmed = value.trim();
+  if (isShareId(trimmed)) return trimmed.toLowerCase();
+
+  return trimmed.match(/(?:^|[-_])([a-f0-9]{10,20})$/i)?.[1]?.toLowerCase() || '';
+}
+
 function createShareId() {
   return randomBytes(5).toString('hex');
 }
@@ -401,15 +410,16 @@ async function saveSharedTripExport(exportedTrip) {
 }
 
 async function readSharedTripExport(id) {
-  if (!isShareId(id)) return null;
+  const shareId = extractShareId(id);
+  if (!shareId) return null;
 
   if (await canUseDatabase()) {
-    const result = await pool.query('SELECT export FROM shared_trips WHERE id = $1', [id]);
+    const result = await pool.query('SELECT export FROM shared_trips WHERE id = $1', [shareId]);
     return normalizeSharedTripExport(result.rows[0]?.export);
   }
 
   await loadFileSharedTrips();
-  return normalizeSharedTripExport(fileSharedTrips.get(id));
+  return normalizeSharedTripExport(fileSharedTrips.get(shareId));
 }
 
 function isDateOnly(value) {
@@ -999,8 +1009,16 @@ async function handleApi(request, response, url) {
   sendJson(response, 405, { error: 'METHOD_NOT_ALLOWED' });
 }
 
+function safeDecodePathname(pathname) {
+  try {
+    return decodeURIComponent(pathname);
+  } catch {
+    return '/';
+  }
+}
+
 async function serveStatic(request, response, url) {
-  const requestPath = decodeURIComponent(url.pathname);
+  const requestPath = safeDecodePathname(url.pathname);
   const normalizedPath = path.normalize(requestPath).replace(/^(\.\.[/\\])+/, '');
   const filePath = path.join(distDir, normalizedPath === '/' ? 'index.html' : normalizedPath);
   const safePath = filePath.startsWith(distDir) ? filePath : path.join(distDir, 'index.html');
