@@ -153,6 +153,25 @@ button {
   flex-wrap: wrap;
 }
 
+.workspace-switcher {
+  min-width: 320px;
+  max-width: 560px;
+  display: grid;
+  grid-template-columns: auto minmax(130px, 170px) minmax(150px, 1fr) 40px;
+  align-items: center;
+  gap: 0.45rem;
+  flex: 1 1 440px;
+}
+
+.workspace-switcher label {
+  white-space: nowrap;
+}
+
+.workspace-switcher input,
+.workspace-switcher select {
+  height: 38px;
+}
+
 .view-tabs {
   display: inline-flex;
   align-items: center;
@@ -650,6 +669,11 @@ textarea:focus {
 .stop-tag.sleep-friend {
   background: #ffedc8;
   color: #7a3f12;
+}
+
+.stop-tag.travel {
+  background: #e8e3fb;
+  color: #4a2f8f;
 }
 
 .stop-tag.remote {
@@ -1311,6 +1335,7 @@ textarea:focus {
 }
 
 .coordinate-grid,
+.travel-section,
 .sleeping-section,
 .document-editor,
 .button-grid {
@@ -1337,6 +1362,14 @@ textarea:focus {
 .sleeping-hint {
   margin: -0.15rem 0 0;
   color: #7a3f12;
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.travel-hint {
+  margin: -0.15rem 0 0;
+  color: #47615d;
   font-size: 0.8rem;
   font-weight: 700;
   line-height: 1.35;
@@ -1569,6 +1602,7 @@ code {
   }
 
   .stop-form textarea,
+  .travel-section,
   .sleeping-section,
   .stop-document-actions,
   .toggle-row,
@@ -1609,6 +1643,18 @@ code {
   .topbar-actions {
     width: 100%;
     justify-content: flex-start;
+  }
+
+  .workspace-switcher {
+    width: 100%;
+    max-width: none;
+    min-width: 0;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 40px;
+    flex-basis: auto;
+  }
+
+  .workspace-switcher label {
+    grid-column: 1 / -1;
   }
 
   .view-tabs {
@@ -1703,6 +1749,14 @@ code {
 
   .save-status {
     width: 100%;
+  }
+
+  .workspace-switcher {
+    grid-template-columns: minmax(0, 1fr) 40px;
+  }
+
+  .workspace-switcher select {
+    grid-column: 1 / -1;
   }
 
   .json-modal-actions {

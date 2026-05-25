@@ -16,6 +16,11 @@ const databaseUrl = process.env.DATABASE_URL;
 const openaiToken = process.env.OPENAI_TOKEN || process.env.OPENAI_API_KEY;
 const openaiModel = process.env.OPENAI_MODEL || 'gpt-5-mini';
 const maxBodyBytes = 8 * 1024 * 1024;
+const defaultWorkspaceId = 'workspace-default';
+const targetCarLegMiles = 450;
+const maxComfortableCarLegMiles = 550;
+const estimatedCarAverageMph = 55;
+const travelModeOptions = ['car', 'plane', 'boat'];
 
 const routeProposalSchema = {
   type: 'object',
@@ -51,6 +56,7 @@ const routeProposalSchema = {
               'remoteWork',
               'sleepingArrangement',
               'friendName',
+              'travelMode',
             ],
             properties: {
               id: { type: 'string' },
@@ -63,6 +69,7 @@ const routeProposalSchema = {
               remoteWork: { type: 'boolean' },
               sleepingArrangement: { type: 'string', enum: ['camping', 'hotel', 'friend'] },
               friendName: { type: 'string' },
+              travelMode: { type: 'string', enum: travelModeOptions },
             },
           },
         },
@@ -94,6 +101,10 @@ let databaseSetupError = null;
 
 function normalizeSleepingArrangement(value) {
   return ['camping', 'hotel', 'friend'].includes(value) ? value : 'camping';
+}
+
+function normalizeTravelMode(value) {
+  return travelModeOptions.includes(value) ? value : 'car';
 }
 
 function normalizeDocumentKind(value) {
@@ -205,6 +216,7 @@ function normalizeTrip(value) {
       remoteWork: Boolean(stop.remoteWork),
       sleepingArrangement: normalizeSleepingArrangement(stop.sleepingArrangement),
       friendName: typeof stop.friendName === 'string' ? stop.friendName : '',
+      travelMode: index === 0 ? 'car' : normalizeTravelMode(stop.travelMode),
     }))
     .filter((stop) => stop.lat >= -90 && stop.lat <= 90 && stop.lng >= -180 && stop.lng <= 180)
     .sort((a, b) => a.order - b.order)
@@ -220,6 +232,10 @@ function normalizeTrip(value) {
 
   return {
     id: value.id,
+    workspaceId:
+      typeof value.workspaceId === 'string' && value.workspaceId
+        ? value.workspaceId
+        : defaultWorkspaceId,
     name: value.name.trim() || 'Untitled trip',
     notes: typeof value.notes === 'string' ? value.notes : '',
     stops,
@@ -360,6 +376,53 @@ function calculatePointMiles(previous, next) {
   return earthRadiusMiles * c;
 }
 
+function estimateRoadMiles(previous, next) {
+  return Math.round(calculatePointMiles(previous, next) * 1.2);
+}
+
+function instructionAllowsNonCarTravel(instruction, trip) {
+  if (trip.stops.some((stop, index) => index > 0 && stop.travelMode !== 'car')) return true;
+
+  return /\b(non[-\s]?car|plane|flight|fly|flying|airport|boat|ferry|ship|sail|train|rail)\b/i.test(instruction);
+}
+
+function enforceTravelModeRules(originalTrip, proposedStops, instruction) {
+  const allowNonCarTravel = instructionAllowsNonCarTravel(instruction, originalTrip);
+
+  return proposedStops.map((stop, index) => {
+    const travelMode = index === 0 ? 'car' : normalizeTravelMode(stop.travelMode);
+
+    return {
+      ...stop,
+      travelMode: allowNonCarTravel ? travelMode : 'car',
+    };
+  });
+}
+
+function buildDrivingPlanningContext(trip) {
+  return {
+    travelMode: 'passenger-car',
+    routeBasis: 'public roads and car-accessible stops',
+    targetCarLegMiles,
+    maxComfortableCarLegMiles,
+    estimatedCarAverageMph,
+    currentLegs: trip.stops.slice(1).map((stop, index) => {
+      const previous = trip.stops[index];
+      const estimatedDriveMiles = estimateRoadMiles(previous, stop);
+
+      return {
+        fromOrder: previous.order,
+        toOrder: stop.order,
+        from: previous.label,
+        to: stop.label,
+        travelMode: stop.travelMode,
+        estimatedDriveMiles,
+        estimatedDriveHours: Math.round((estimatedDriveMiles / estimatedCarAverageMph) * 10) / 10,
+      };
+    }),
+  };
+}
+
 function getAllowedFriendStays(originalTrip) {
   return originalTrip.stops
     .filter((stop) => stop.sleepingArrangement === 'friend' && typeof stop.friendName === 'string' && stop.friendName.trim())
@@ -436,7 +499,7 @@ function buildRouteAssistantLocks(trip) {
   };
 }
 
-function enforceRouteAssistantLocks(originalTrip, proposedTrip) {
+function enforceRouteAssistantLocks(originalTrip, proposedTrip, instruction) {
   const lockedStart = originalTrip.stops[0];
   const lockedEnd = originalTrip.stops[originalTrip.stops.length - 1];
   const hasDistinctEnd = originalTrip.stops.length > 1;
@@ -455,11 +518,16 @@ function enforceRouteAssistantLocks(originalTrip, proposedTrip) {
   const lockedStops = hasDistinctEnd
     ? [makeLockedStop(lockedStart, 1), ...proposedMiddle, makeLockedStop(lockedEnd, proposedMiddle.length + 2)]
     : [makeLockedStop(lockedStart, 1), ...proposedMiddle];
-  const stops = enforceFriendStayRules(enforceRemoteWorkDates(originalTrip, lockedStops), allowedFriendStays)
+  const stops = enforceTravelModeRules(
+    originalTrip,
+    enforceFriendStayRules(enforceRemoteWorkDates(originalTrip, lockedStops), allowedFriendStays),
+    instruction,
+  )
     .map((stop, index) => ({ ...stop, order: index + 1 }));
 
   return normalizeTrip({
     ...proposedTrip,
+    workspaceId: originalTrip.workspaceId,
     stops,
   }) || proposedTrip;
 }
@@ -519,6 +587,7 @@ async function handleApi(request, response, url) {
     }
 
     const lockedAnchors = buildRouteAssistantLocks(trip);
+    const drivingPlanningContext = buildDrivingPlanningContext(trip);
 
     const openaiResponse = await fetch('https://api.openai.com/v1/responses', {
       method: 'POST',
@@ -532,13 +601,18 @@ async function handleApi(request, response, url) {
           'You are a route-planning assistant for a road-trip planner.',
           'Return only the requested structured JSON.',
           'Revise the supplied trip according to the user request. You may add, remove, reorder, rename, or adjust stops.',
+          'Plan the itinerary for a passenger car using public roads by default. Do not add non-car travel unless the user explicitly asks for it or the supplied trip already has a non-car leg.',
+          'travelMode means how the traveler gets from the previous stop to this stop. The first stop must use travelMode=car. Use travelMode=car, plane, or boat only.',
+          'For car legs, every added or reordered stop must be realistically reachable by car from the surrounding stops. Prefer stops near plausible driving corridors.',
+          'For plane or boat legs, use plausible airport, ferry, or dock-adjacent destinations and mention the non-car leg in notes. The app will estimate plane/boat cost separately.',
+          `Use driving days that make sense for a car trip: target roughly ${targetCarLegMiles} miles or less between overnight stops, and avoid creating legs over ${maxComfortableCarLegMiles} miles unless the existing schedule leaves no reasonable alternative.`,
           'The first and last stops are locked anchors. Keep them as the first and last stops with the same date, label, latitude, and longitude.',
           'The locked start/end date range cannot change. Keep all dated stops inside that inclusive range when both dates are known.',
           'If the user asks to change a locked start/end date or location, ignore that part and explain in the summary that those anchors stayed locked.',
           'Remote-work dates are locked. Keep the exact same calendar dates marked remoteWork=true as the input trip, do not add new remoteWork dates, and do not remove existing remoteWork dates.',
           'Preserve useful existing dates, notes, sleeping arrangements, friend names, and stops unless the user asks to change them.',
           'Use approximate latitude and longitude for well-known places when adding stops.',
-          'Every stop must have order starting at 1, a human-readable label, numeric lat/lng, notes, date, remoteWork, sleepingArrangement, and friendName.',
+          'Every stop must have order starting at 1, a human-readable label, numeric lat/lng, notes, date, remoteWork, sleepingArrangement, friendName, and travelMode.',
           'sleepingArrangement must be camping, hotel, or friend. Never invent a friend stay or friendName.',
           'Only use sleepingArrangement=friend in a city that already has an existing named friend stay in the supplied trip. Reuse that existing city friendName. Do not create friend stays in new cities, even if the user asks for one.',
           'For any stop that is not an allowed same-city friend stay, friendName must be an empty string. For newly added stops, default sleepingArrangement to camping unless the user explicitly asks for hotel.',
@@ -548,6 +622,7 @@ async function handleApi(request, response, url) {
         input: JSON.stringify({
           instruction,
           lockedAnchors,
+          drivingPlanningContext,
           trip,
         }),
         max_output_tokens: 12000,
@@ -584,10 +659,13 @@ async function handleApi(request, response, url) {
       return;
     }
 
-    const anchoredTrip = enforceRouteAssistantLocks(trip, proposedTrip);
+    const anchoredTrip = enforceRouteAssistantLocks(trip, proposedTrip, instruction);
+    const travelSummary = instructionAllowsNonCarTravel(instruction, trip)
+      ? 'Car-first planning stayed on, with requested non-car legs allowed.'
+      : 'Planned for passenger-car driving.';
 
     sendJson(response, 200, {
-      summary: `${proposal.summary} Start/end date and locations stayed locked. Remote-work dates and friend stays were kept constrained.`,
+      summary: `${proposal.summary} ${travelSummary} Start/end date and locations stayed locked. Remote-work dates and friend stays were kept constrained.`,
       trip: anchoredTrip,
     });
     return;
@@ -616,8 +694,8 @@ async function handleApi(request, response, url) {
   if (request.method === 'PUT') {
     if (!(await requireDatabase(response))) return;
 
-    const trip = await readJsonBody(request);
-    if (!isTrip(trip) || trip.id !== tripId) {
+    const trip = normalizeTrip(await readJsonBody(request));
+    if (!trip || trip.id !== tripId) {
       sendJson(response, 400, { error: 'INVALID_TRIP' });
       return;
     }

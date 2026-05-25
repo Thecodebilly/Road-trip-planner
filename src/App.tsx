@@ -12,6 +12,7 @@ import {
 import {
   BedDouble,
   CalendarDays,
+  Car,
   ChevronDown,
   ChevronUp,
   Copy,
@@ -25,9 +26,11 @@ import {
   MapPin,
   Maximize2,
   Paperclip,
+  Plane,
   Plus,
   Route,
   Save,
+  Ship,
   Sparkles,
   Trash2,
   Upload,
@@ -37,6 +40,7 @@ import {
 import tripStops from './tripStops.json';
 
 type SleepingArrangement = 'camping' | 'hotel' | 'friend';
+type TravelMode = 'car' | 'plane' | 'boat';
 type HotelRegion = 'Northeast' | 'South' | 'Midwest' | 'West';
 type TripDocumentKind = 'text' | 'file';
 
@@ -50,12 +54,14 @@ type ImportedTripStop = {
   remoteWork?: boolean;
   sleepingArrangement?: SleepingArrangement;
   friendName?: string;
+  travelMode?: TravelMode;
 };
 
-type TripStop = Omit<ImportedTripStop, 'sleepingArrangement' | 'friendName'> & {
+type TripStop = Omit<ImportedTripStop, 'sleepingArrangement' | 'friendName' | 'travelMode'> & {
   id: string;
   sleepingArrangement: SleepingArrangement;
   friendName: string;
+  travelMode: TravelMode;
 };
 
 type DriveEstimate = {
@@ -96,7 +102,7 @@ type HotelCandidate = {
   score: number;
 };
 
-type CachedRouteLeg = Pick<DriveEstimate, 'distanceMiles' | 'durationMinutes' | 'source'>;
+type CachedRouteLeg = DriveEstimate;
 
 type CachedRoute = {
   version: 1;
@@ -126,8 +132,16 @@ type TripDocument = {
   updatedAt: string;
 };
 
+type Workspace = {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 type Trip = {
   id: string;
+  workspaceId: string;
   name: string;
   notes: string;
   stops: TripStop[];
@@ -197,10 +211,13 @@ const googleMapsLibraries: Libraries = ['places'];
 const usCenter = { lat: 39.8283, lng: -98.5795 };
 const savedTripsKey = 'road-trip-planner.savedTrips.v1';
 const activeTripKey = 'road-trip-planner.activeTrip.v1';
+const workspacesKey = 'road-trip-planner.workspaces.v1';
+const activeWorkspaceKey = 'road-trip-planner.activeWorkspace.v1';
 const gasPriceKey = 'road-trip-planner.gasPrice.v1';
 const fuelMpgKey = 'road-trip-planner.fuelMpg.v1';
 const routeCacheKey = 'road-trip-planner.routeCache.v1';
 const hotelCacheKey = 'road-trip-planner.hotelCache.v1';
+const defaultWorkspaceId = 'workspace-default';
 const defaultTripId = 'default-2026-usa-itinerary';
 const tripExportFormat = 'road-trip-planner.saved-trip.v1';
 const maxStopsPerDirectionsRequest = 25;
@@ -216,6 +233,11 @@ const defaultGasPrice = 3.5;
 const defaultFuelMpg = 25;
 const estimatedAverageMph = 55;
 const sleepingArrangementOptions: SleepingArrangement[] = ['camping', 'hotel', 'friend'];
+const travelModeOptions: TravelMode[] = ['car', 'plane', 'boat'];
+const nonCarTravelCostAssumptions: Record<Exclude<TravelMode, 'car'>, { base: number; perMile: number; minimum: number }> = {
+  plane: { base: 95, perMile: 0.22, minimum: 140 },
+  boat: { base: 45, perMile: 0.75, minimum: 65 },
+};
 // Broad nightly assumptions for planning totals; live hotel search still shows actual nearby options.
 const hotelRegionAverageNightlyRates: Record<HotelRegion, number> = {
   Northeast: 175,
@@ -313,6 +335,7 @@ const exportFormatExample = JSON.stringify(
           remoteWork: false,
           sleepingArrangement: 'camping',
           friendName: '',
+          travelMode: 'car',
         },
       ],
     },
@@ -329,6 +352,7 @@ const seedStops = [...(tripStops as ImportedTripStop[])]
     order: index + 1,
     sleepingArrangement: normalizeSleepingArrangement(stop.sleepingArrangement),
     friendName: typeof stop.friendName === 'string' ? stop.friendName : '',
+    travelMode: normalizeTravelMode(stop.travelMode),
   }));
 
 const mapStyles: google.maps.MapTypeStyle[] = [
@@ -372,6 +396,10 @@ function normalizeSleepingArrangement(value: unknown): SleepingArrangement {
     : 'camping';
 }
 
+function normalizeTravelMode(value: unknown): TravelMode {
+  return travelModeOptions.includes(value as TravelMode) ? (value as TravelMode) : 'car';
+}
+
 function normalizeDocumentKind(value: unknown): TripDocumentKind {
   return value === 'file' ? 'file' : 'text';
 }
@@ -412,10 +440,43 @@ function normalizeTripDocument(
   };
 }
 
-function normalizeTrip(candidate: Partial<Trip> | null | undefined): Trip | null {
+function normalizeWorkspace(candidate: Partial<Workspace> | null | undefined): Workspace | null {
+  if (!candidate || typeof candidate !== 'object') return null;
+
+  const now = new Date().toISOString();
+  const name = typeof candidate.name === 'string' ? candidate.name.trim() : '';
+  if (!name) return null;
+
+  return {
+    id: typeof candidate.id === 'string' && candidate.id ? candidate.id : makeId('workspace'),
+    name,
+    createdAt: typeof candidate.createdAt === 'string' ? candidate.createdAt : now,
+    updatedAt: typeof candidate.updatedAt === 'string' ? candidate.updatedAt : now,
+  };
+}
+
+function createDefaultWorkspace(): Workspace {
+  const now = new Date().toISOString();
+
+  return {
+    id: defaultWorkspaceId,
+    name: 'Main workspace',
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function normalizeTrip(
+  candidate: Partial<Trip> | null | undefined,
+  fallbackWorkspaceId = defaultWorkspaceId,
+): Trip | null {
   if (!candidate || !Array.isArray(candidate.stops)) return null;
 
   const now = new Date().toISOString();
+  const workspaceId =
+    typeof candidate.workspaceId === 'string' && candidate.workspaceId
+      ? candidate.workspaceId
+      : fallbackWorkspaceId;
   const stops = candidate.stops
     .filter((stop) => stop && typeof stop.label === 'string')
     .map((stop, index) => ({
@@ -429,6 +490,7 @@ function normalizeTrip(candidate: Partial<Trip> | null | undefined): Trip | null
       remoteWork: Boolean(stop.remoteWork),
       sleepingArrangement: normalizeSleepingArrangement(stop.sleepingArrangement),
       friendName: typeof stop.friendName === 'string' ? stop.friendName : '',
+      travelMode: index === 0 ? 'car' : normalizeTravelMode(stop.travelMode),
     }));
   const stopIds = new Set(stops.map((stop) => stop.id));
   const documents = Array.isArray(candidate.documents)
@@ -439,6 +501,7 @@ function normalizeTrip(candidate: Partial<Trip> | null | undefined): Trip | null
 
   return {
     id: typeof candidate.id === 'string' ? candidate.id : makeId('trip'),
+    workspaceId,
     name: candidate.name?.trim() || 'Untitled trip',
     notes: typeof candidate.notes === 'string' ? candidate.notes : '',
     stops: resequenceStops(stops),
@@ -448,11 +511,12 @@ function normalizeTrip(candidate: Partial<Trip> | null | undefined): Trip | null
   };
 }
 
-function createDefaultTrip(): Trip {
+function createDefaultTrip(workspaceId = defaultWorkspaceId): Trip {
   const now = new Date().toISOString();
 
   return {
     id: defaultTripId,
+    workspaceId,
     name: '2026 USA itinerary',
     notes: 'Jacksonville to Winston-Salem through the Southwest, California, and the Blue Ridge.',
     stops: seedStops,
@@ -462,12 +526,13 @@ function createDefaultTrip(): Trip {
   };
 }
 
-function createBlankTrip(): Trip {
+function createBlankTrip(workspaceId = defaultWorkspaceId, name = 'Untitled trip'): Trip {
   const now = new Date().toISOString();
 
   return {
     id: makeId('trip'),
-    name: 'Untitled trip',
+    workspaceId,
+    name,
     notes: '',
     stops: [
       {
@@ -481,6 +546,7 @@ function createBlankTrip(): Trip {
         remoteWork: false,
         sleepingArrangement: 'camping',
         friendName: '',
+        travelMode: 'car',
       },
     ],
     documents: [],
@@ -489,27 +555,116 @@ function createBlankTrip(): Trip {
   };
 }
 
-function readActiveTrip() {
+function workspaceStorageKey(baseKey: string, workspaceId: string) {
+  return `${baseKey}.${workspaceId}`;
+}
+
+function readWorkspaces() {
+  const defaultWorkspace = createDefaultWorkspace();
+
   try {
-    const saved = window.localStorage.getItem(activeTripKey);
-    return saved ? normalizeTrip(JSON.parse(saved)) : null;
+    const saved = window.localStorage.getItem(workspacesKey);
+    const parsed = saved ? JSON.parse(saved) : [];
+    const workspaces = Array.isArray(parsed)
+      ? parsed
+          .map((workspace) => normalizeWorkspace(workspace))
+          .filter((workspace): workspace is Workspace => Boolean(workspace))
+      : [];
+    const workspaceById = new Map<string, Workspace>();
+
+    [defaultWorkspace, ...workspaces].forEach((workspace) => {
+      if (!workspaceById.has(workspace.id)) {
+        workspaceById.set(workspace.id, workspace);
+      }
+    });
+
+    return [...workspaceById.values()];
+  } catch {
+    return [defaultWorkspace];
+  }
+}
+
+function readActiveWorkspaceId(workspaces: Workspace[]) {
+  try {
+    const saved = window.localStorage.getItem(activeWorkspaceKey);
+    const parsed = saved ? JSON.parse(saved) : '';
+    if (typeof parsed === 'string' && workspaces.some((workspace) => workspace.id === parsed)) {
+      return parsed;
+    }
+  } catch {
+    // localStorage can be unavailable in private browsing or locked-down embeds.
+  }
+
+  return workspaces[0]?.id || defaultWorkspaceId;
+}
+
+function readActiveTrip(workspaceId = defaultWorkspaceId) {
+  try {
+    const workspaceSaved = window.localStorage.getItem(workspaceStorageKey(activeTripKey, workspaceId));
+    const legacySaved = workspaceId === defaultWorkspaceId ? window.localStorage.getItem(activeTripKey) : null;
+    const saved = workspaceSaved || legacySaved;
+
+    return saved ? normalizeTrip(JSON.parse(saved), workspaceId) : null;
   } catch {
     return null;
   }
 }
 
-function readSavedTrips() {
+function readSavedTrips(workspaceId = defaultWorkspaceId) {
   try {
-    const saved = window.localStorage.getItem(savedTripsKey);
+    const workspaceSaved = window.localStorage.getItem(workspaceStorageKey(savedTripsKey, workspaceId));
+    const legacySaved = workspaceId === defaultWorkspaceId ? window.localStorage.getItem(savedTripsKey) : null;
+    const saved = workspaceSaved || legacySaved;
     const parsed = saved ? JSON.parse(saved) : [];
     if (!Array.isArray(parsed)) return [];
 
     return parsed
-      .map((trip) => normalizeTrip(trip))
+      .map((trip) => normalizeTrip(trip, workspaceId))
       .filter((trip): trip is Trip => Boolean(trip))
+      .filter((trip) => trip.workspaceId === workspaceId)
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   } catch {
     return [];
+  }
+}
+
+function createInitialTripForWorkspace(workspaceId: string) {
+  return (
+    readActiveTrip(workspaceId) ||
+    (workspaceId === defaultWorkspaceId ? createDefaultTrip(workspaceId) : createBlankTrip(workspaceId))
+  );
+}
+
+function getInitialWorkspaceSnapshot() {
+  const workspaces = readWorkspaces();
+  const activeWorkspaceId = readActiveWorkspaceId(workspaces);
+
+  return {
+    workspaces,
+    activeWorkspaceId,
+    savedTrips: readSavedTrips(activeWorkspaceId),
+    activeTrip: createInitialTripForWorkspace(activeWorkspaceId),
+  };
+}
+
+function writeWorkspaceActiveTrip(workspaceId: string, trip: Trip) {
+  writeStorage(workspaceStorageKey(activeTripKey, workspaceId), trip);
+  if (workspaceId === defaultWorkspaceId) {
+    removeStorage(activeTripKey);
+  }
+}
+
+function writeWorkspaceSavedTrips(workspaceId: string, trips: Trip[]) {
+  writeStorage(workspaceStorageKey(savedTripsKey, workspaceId), trips);
+  if (workspaceId === defaultWorkspaceId) {
+    removeStorage(savedTripsKey);
+  }
+}
+
+function removeWorkspaceSavedTrips(workspaceId: string) {
+  removeStorage(workspaceStorageKey(savedTripsKey, workspaceId));
+  if (workspaceId === defaultWorkspaceId) {
+    removeStorage(savedTripsKey);
   }
 }
 
@@ -584,7 +739,7 @@ function mergeTripsByFreshness(...tripGroups: Trip[][]) {
   const tripsById = new Map<string, Trip>();
 
   tripGroups.flat().forEach((trip) => {
-    const normalizedTrip = normalizeTrip(trip);
+    const normalizedTrip = normalizeTrip(trip, trip.workspaceId || defaultWorkspaceId);
     if (!normalizedTrip) return;
 
     const existingTrip = tripsById.get(normalizedTrip.id);
@@ -594,6 +749,10 @@ function mergeTripsByFreshness(...tripGroups: Trip[][]) {
   });
 
   return sortTripsByUpdatedAt([...tripsById.values()]);
+}
+
+function filterTripsForWorkspace(trips: Trip[], workspaceId: string) {
+  return sortTripsByUpdatedAt(trips.filter((trip) => trip.workspaceId === workspaceId));
 }
 
 async function fetchSavedTripsFromDatabase() {
@@ -631,7 +790,7 @@ async function saveTripToDatabase(trip: Trip) {
     throw new Error(`SAVE_TRIP_${response.status}`);
   }
 
-  const savedTrip = normalizeTrip(await response.json());
+  const savedTrip = normalizeTrip(await response.json(), trip.workspaceId);
   if (!savedTrip) {
     throw new Error('INVALID_SAVED_TRIP_RESPONSE');
   }
@@ -664,7 +823,7 @@ async function requestRouteAssistant(trip: Trip, instruction: string): Promise<R
   }
 
   const result = await response.json();
-  const proposedTrip = normalizeTrip(result.trip);
+  const proposedTrip = normalizeTrip(result.trip, trip.workspaceId);
   if (!proposedTrip || typeof result.summary !== 'string') {
     throw new Error('INVALID_ROUTE_ASSISTANT_RESPONSE');
   }
@@ -679,17 +838,18 @@ function createTripExport(trip: Trip): ExportedTrip {
   return {
     format: tripExportFormat,
     exportedAt: new Date().toISOString(),
-    trip: normalizeTrip(trip) || trip,
+    trip: normalizeTrip(trip, trip.workspaceId) || trip,
   };
 }
 
-function parseTripImport(candidate: unknown) {
+function parseTripImport(candidate: unknown, workspaceId = defaultWorkspaceId) {
   if (!candidate || typeof candidate !== 'object') return null;
 
   if (Array.isArray(candidate)) {
     const now = new Date().toISOString();
     return normalizeTrip({
       id: makeId('trip'),
+      workspaceId,
       name: 'Imported itinerary',
       notes: 'Imported from a raw stop list.',
       stops: candidate,
@@ -702,7 +862,13 @@ function parseTripImport(candidate: unknown) {
   if (exportedTrip.format !== tripExportFormat) return null;
   if (typeof exportedTrip.exportedAt !== 'string') return null;
 
-  return normalizeTrip(exportedTrip.trip);
+  return normalizeTrip(
+    {
+      ...(exportedTrip.trip || {}),
+      workspaceId,
+    },
+    workspaceId,
+  );
 }
 
 function sanitizeFileName(value: string) {
@@ -891,13 +1057,15 @@ function formatMapDateRange(stops: TripStop[]) {
 }
 
 function formatMapStopRange(stops: TripStop[]) {
-  const orders = stops.map((stop) => stop.order).sort((first, second) => first - second);
+  const orders = Array.from(new Set(stops.map((stop) => stop.order))).sort((first, second) => first - second);
   if (!orders.length) return '';
 
   const first = orders[0];
   const last = orders[orders.length - 1];
+  const isConsecutive = orders.every((order, index) => index === 0 || order === orders[index - 1] + 1);
 
-  return first === last ? String(first) : `${first}-${last}`;
+  if (first === last) return String(first);
+  return isConsecutive ? `${first}-${last}` : orders.join(', ');
 }
 
 function formatMapGroupHeading(stops: TripStop[]) {
@@ -1043,6 +1211,8 @@ function buildEstimatedDriveEstimates(stops: TripStop[]): DriveEstimate[] {
   for (let index = 1; index < stops.length; index += 1) {
     const previous = stops[index - 1];
     const next = stops[index];
+    if (next.travelMode !== 'car') continue;
+
     const distanceMiles = calculateSegmentMiles(previous, next);
 
     estimates.push({
@@ -1055,6 +1225,79 @@ function buildEstimatedDriveEstimates(stops: TripStop[]): DriveEstimate[] {
   }
 
   return estimates;
+}
+
+function getTravelModeLabel(value: TravelMode) {
+  switch (value) {
+    case 'plane':
+      return 'Plane';
+    case 'boat':
+      return 'Boat';
+    default:
+      return 'Car';
+  }
+}
+
+function getTravelLegMiles(stops: TripStop[], stopIndex: number) {
+  const previous = stops[stopIndex - 1];
+  const stop = stops[stopIndex];
+  if (!previous || !stop) return 0;
+
+  return Math.round(calculatePointMiles(previous, stop));
+}
+
+function calculateNonCarTravelLegCost(stops: TripStop[], stopIndex: number) {
+  const stop = stops[stopIndex];
+  if (!stop || stop.travelMode === 'car') return 0;
+
+  const assumptions = nonCarTravelCostAssumptions[stop.travelMode];
+  const miles = getTravelLegMiles(stops, stopIndex);
+
+  return Math.max(assumptions.minimum, assumptions.base + miles * assumptions.perMile);
+}
+
+function calculateNonCarTravelCost(stops: TripStop[]) {
+  return stops.reduce((total, _stop, index) => total + calculateNonCarTravelLegCost(stops, index), 0);
+}
+
+function countNonCarTravelLegs(stops: TripStop[]) {
+  return stops.filter((stop, index) => index > 0 && stop.travelMode !== 'car').length;
+}
+
+function formatTravelLegSummary(
+  stop: TripStop,
+  stopIndex: number,
+  stops: TripStop[],
+  driveEstimate: DriveEstimate | undefined,
+  gasPrice: number,
+  fuelMpg: number,
+) {
+  if (stopIndex === 0) return 'Starting point';
+
+  if (stop.travelMode === 'car') {
+    if (driveEstimate) return formatDriveSummary(driveEstimate, gasPrice, fuelMpg);
+
+    const previous = stops[stopIndex - 1];
+    const distanceMiles = previous ? calculateSegmentMiles(previous, stop) : 0;
+    return formatDriveSummary(
+      {
+        fromStopId: previous?.id || '',
+        toStopId: stop.id,
+        distanceMiles,
+        durationMinutes: estimateDriveMinutes(distanceMiles),
+        source: 'estimated',
+      },
+      gasPrice,
+      fuelMpg,
+    );
+  }
+
+  const miles = getTravelLegMiles(stops, stopIndex);
+  const cost = calculateNonCarTravelLegCost(stops, stopIndex);
+
+  return `${getTravelModeLabel(stop.travelMode)} from previous: Est. ${miles.toLocaleString()} mi | ${formatCurrency(
+    cost,
+  )} travel`;
 }
 
 function buildRoadDriveEstimates(routes: RoadRoute[], stops: TripStop[]) {
@@ -1085,7 +1328,9 @@ function buildRoadDriveEstimates(routes: RoadRoute[], stops: TripStop[]) {
 }
 
 function cacheRouteLegs(estimates: DriveEstimate[]): CachedRouteLeg[] {
-  return estimates.map(({ distanceMiles, durationMinutes, source }) => ({
+  return estimates.map(({ fromStopId, toStopId, distanceMiles, durationMinutes, source }) => ({
+    fromStopId,
+    toStopId,
     distanceMiles,
     durationMinutes,
     source,
@@ -1093,13 +1338,16 @@ function cacheRouteLegs(estimates: DriveEstimate[]): CachedRouteLeg[] {
 }
 
 function buildCachedDriveEstimates(routeLegs: CachedRouteLeg[], stops: TripStop[]) {
-  return routeLegs.slice(0, Math.max(0, stops.length - 1)).map((leg, index) => ({
-    fromStopId: stops[index].id,
-    toStopId: stops[index + 1].id,
-    distanceMiles: leg.distanceMiles,
-    durationMinutes: leg.durationMinutes,
-    source: leg.source,
-  }));
+  const stopIds = new Set(stops.map((stop) => stop.id));
+
+  return routeLegs.filter(
+    (leg): leg is DriveEstimate =>
+      stopIds.has(leg.fromStopId) &&
+      stopIds.has(leg.toStopId) &&
+      Number.isFinite(leg.distanceMiles) &&
+      Number.isFinite(leg.durationMinutes) &&
+      (leg.source === 'road' || leg.source === 'estimated'),
+  );
 }
 
 function isPosition(value: unknown): value is google.maps.LatLngLiteral {
@@ -1115,7 +1363,7 @@ function readCachedRoute(key: string, stops: TripStop[]) {
   const cachedRoute = getCachedValue<CachedRoute>(routeCacheKey, key, routeCacheTtlMs);
   if (!cachedRoute || cachedRoute.version !== 1) return null;
   if (!Array.isArray(cachedRoute.routePaths) || !Array.isArray(cachedRoute.routeLegs)) return null;
-  if (cachedRoute.routeLegs.length !== Math.max(0, stops.length - 1)) return null;
+  if (cachedRoute.routeLegs.length !== getCarLegCount(stops)) return null;
 
   const routePaths = cachedRoute.routePaths
     .map((routePath) => (Array.isArray(routePath) ? routePath.filter(isPosition).map((position) => roundPosition(position)) : []))
@@ -1401,7 +1649,9 @@ function roundPosition(position: google.maps.LatLngLiteral, precision = 5) {
 }
 
 function buildRouteCacheKey(stops: TripStop[]) {
-  return stops.map((stop) => `${stop.lat.toFixed(5)},${stop.lng.toFixed(5)}`).join('|');
+  return stops
+    .map((stop, index) => `${index === 0 ? 'car' : stop.travelMode}:${stop.lat.toFixed(5)},${stop.lng.toFixed(5)}`)
+    .join('|');
 }
 
 function buildHotelPointCacheKey(searchPoint: HotelSearchPoint) {
@@ -1532,15 +1782,38 @@ async function searchHotelsNearPoint(
 
 function splitStopsForDirections(stops: TripStop[]) {
   const chunks: TripStop[][] = [];
-  let startIndex = 0;
+  let chunk: TripStop[] = [];
 
-  while (startIndex < stops.length - 1) {
-    const endIndex = Math.min(startIndex + maxStopsPerDirectionsRequest - 1, stops.length - 1);
-    chunks.push(stops.slice(startIndex, endIndex + 1));
-    startIndex = endIndex;
+  for (let index = 1; index < stops.length; index += 1) {
+    const previous = stops[index - 1];
+    const stop = stops[index];
+
+    if (stop.travelMode !== 'car') {
+      if (chunk.length > 1) chunks.push(chunk);
+      chunk = [];
+      continue;
+    }
+
+    if (!chunk.length || chunk[chunk.length - 1].id !== previous.id) {
+      if (chunk.length > 1) chunks.push(chunk);
+      chunk = [previous];
+    }
+
+    chunk.push(stop);
+
+    if (chunk.length === maxStopsPerDirectionsRequest) {
+      chunks.push(chunk);
+      chunk = [stop];
+    }
   }
 
+  if (chunk.length > 1) chunks.push(chunk);
+
   return chunks;
+}
+
+function getCarLegCount(stops: TripStop[]) {
+  return stops.filter((stop, index) => index > 0 && stop.travelMode === 'car').length;
 }
 
 async function requestRoadRoute(routeLibrary: RoadRoutesLibrary, stops: TripStop[]) {
@@ -1592,8 +1865,17 @@ function App() {
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const documentInputRef = useRef<HTMLInputElement | null>(null);
   const documentUploadStopIdRef = useRef('');
-  const [savedTrips, setSavedTrips] = useState<Trip[]>(readSavedTrips);
-  const [activeTrip, setActiveTrip] = useState<Trip>(() => readActiveTrip() || createDefaultTrip());
+  const initialWorkspaceSnapshotRef = useRef<ReturnType<typeof getInitialWorkspaceSnapshot> | null>(null);
+  if (!initialWorkspaceSnapshotRef.current) {
+    initialWorkspaceSnapshotRef.current = getInitialWorkspaceSnapshot();
+  }
+
+  const initialWorkspaceSnapshot = initialWorkspaceSnapshotRef.current;
+  const [workspaces, setWorkspaces] = useState<Workspace[]>(initialWorkspaceSnapshot.workspaces);
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState(initialWorkspaceSnapshot.activeWorkspaceId);
+  const [workspaceNameDraft, setWorkspaceNameDraft] = useState('');
+  const [savedTrips, setSavedTrips] = useState<Trip[]>(initialWorkspaceSnapshot.savedTrips);
+  const [activeTrip, setActiveTrip] = useState<Trip>(initialWorkspaceSnapshot.activeTrip);
   const [selectedStopId, setSelectedStopId] = useState<string | null>(
     () => activeTrip.stops[0]?.id || null,
   );
@@ -1620,6 +1902,13 @@ function App() {
   const [previewExport, setPreviewExport] = useState<ExportedTrip | null>(null);
   const [previewCopied, setPreviewCopied] = useState(false);
 
+  const activeWorkspace = useMemo(
+    () =>
+      workspaces.find((workspace) => workspace.id === activeWorkspaceId) ||
+      workspaces[0] ||
+      createDefaultWorkspace(),
+    [activeWorkspaceId, workspaces],
+  );
   const stops = useMemo(() => resequenceStops(activeTrip.stops), [activeTrip.stops]);
   const selectedStop = useMemo(
     () => stops.find((stop) => stop.id === selectedStopId) || null,
@@ -1640,10 +1929,13 @@ function App() {
   const displayDriveMinutes = sumDriveMinutes(driveEstimates);
   const gasCost = calculateGasCost(displayMiles, gasPrice, fuelMpg);
   const lodgingCost = useMemo(() => calculateLodgingCost(stops), [stops]);
+  const nonCarTravelCost = useMemo(() => calculateNonCarTravelCost(stops), [stops]);
   const displayGasCost = formatGasCost(displayMiles, gasPrice, fuelMpg);
   const displayLodgingCost = formatCurrency(lodgingCost);
-  const displayTripTotal = formatCurrency(gasCost + lodgingCost);
+  const displayNonCarTravelCost = formatCurrency(nonCarTravelCost);
+  const displayTripTotal = formatCurrency(gasCost + lodgingCost + nonCarTravelCost);
   const remoteStops = useMemo(() => stops.filter((stop) => stop.remoteWork).length, [stops]);
+  const nonCarTravelLegs = useMemo(() => countNonCarTravelLegs(stops), [stops]);
   const documents = activeTrip.documents;
   const selectedDocument = useMemo(
     () => documents.find((document) => document.id === selectedDocumentId) || null,
@@ -1653,6 +1945,18 @@ function App() {
     () => (selectedStop ? documents.filter((document) => document.linkedStopId === selectedStop.id) : []),
     [documents, selectedStop],
   );
+  const selectedStopTravelSummary = useMemo(() => {
+    if (!selectedStop || selectedStopIndex < 0) return '';
+
+    return formatTravelLegSummary(
+      selectedStop,
+      selectedStopIndex,
+      stops,
+      driveEstimateByStopId.get(selectedStop.id),
+      gasPrice,
+      fuelMpg,
+    );
+  }, [driveEstimateByStopId, fuelMpg, gasPrice, selectedStop, selectedStopIndex, stops]);
   const dateRange = useMemo(() => formatStopDateRange(stops), [stops]);
   const saveBackendLabel =
     saveBackend === 'database' ? 'DB' : saveBackend === 'local' ? 'Local' : 'Sync';
@@ -1662,12 +1966,26 @@ function App() {
   );
 
   useEffect(() => {
+    writeStorage(workspacesKey, workspaces);
+  }, [workspaces]);
+
+  useEffect(() => {
+    writeStorage(activeWorkspaceKey, activeWorkspaceId);
+  }, [activeWorkspaceId]);
+
+  useEffect(() => {
     let canceled = false;
-    const localTrips = readSavedTrips();
+    const localTrips = readSavedTrips(activeWorkspaceId);
+
+    setSavedTrips(localTrips);
 
     fetchSavedTripsFromDatabase()
       .then(async (databaseTrips) => {
-        const mergedTrips = mergeTripsByFreshness(databaseTrips, localTrips);
+        const workspaceDatabaseTrips = filterTripsForWorkspace(databaseTrips, activeWorkspaceId);
+        const mergedTrips = filterTripsForWorkspace(
+          mergeTripsByFreshness(workspaceDatabaseTrips, localTrips),
+          activeWorkspaceId,
+        );
 
         if (localTrips.length) {
           await Promise.all(mergedTrips.map((trip) => saveTripToDatabase(trip)));
@@ -1677,7 +1995,7 @@ function App() {
 
         setSavedTrips(mergedTrips);
         setSaveBackend('database');
-        removeStorage(savedTripsKey);
+        removeWorkspaceSavedTrips(activeWorkspaceId);
         if (localTrips.length) {
           setSaveMessage('Synced saved trips to database');
         }
@@ -1691,13 +2009,13 @@ function App() {
     return () => {
       canceled = true;
     };
-  }, []);
+  }, [activeWorkspaceId]);
 
   useEffect(() => {
     if (saveBackend === 'local') {
-      writeStorage(savedTripsKey, savedTrips);
+      writeWorkspaceSavedTrips(activeWorkspaceId, savedTrips);
     }
-  }, [saveBackend, savedTrips]);
+  }, [activeWorkspaceId, saveBackend, savedTrips]);
 
   useEffect(() => {
     writeStorage(gasPriceKey, gasPrice);
@@ -1708,8 +2026,8 @@ function App() {
   }, [fuelMpg]);
 
   useEffect(() => {
-    writeStorage(activeTripKey, activeTrip);
-  }, [activeTrip]);
+    writeWorkspaceActiveTrip(activeWorkspaceId, activeTrip);
+  }, [activeTrip, activeWorkspaceId]);
 
   useEffect(() => {
     if (!previewExport) return undefined;
@@ -1891,6 +2209,7 @@ function App() {
       remoteWork: false,
       sleepingArrangement: 'camping',
       friendName: '',
+      travelMode: 'car',
     };
 
     touchTrip((trip) => {
@@ -1960,6 +2279,7 @@ function App() {
       remoteWork: false,
       sleepingArrangement: 'camping',
       friendName: '',
+      travelMode: 'car',
     };
 
     touchTrip((trip) => {
@@ -2017,10 +2337,11 @@ function App() {
     touchTrip((trip) => ({ ...trip, stops: resequenceStops(nextStops) }));
   };
 
-  const getActiveTripForExport = () => normalizeTrip({ ...activeTrip, stops }) || activeTrip;
+  const getActiveTripForExport = () =>
+    normalizeTrip({ ...activeTrip, workspaceId: activeWorkspaceId, stops }, activeWorkspaceId) || activeTrip;
 
   const previewTripExport = (trip: Trip) => {
-    const normalizedTrip = normalizeTrip(trip) || trip;
+    const normalizedTrip = normalizeTrip(trip, trip.workspaceId || activeWorkspaceId) || trip;
     setPreviewExport(createTripExport(normalizedTrip));
     setPreviewCopied(false);
   };
@@ -2044,7 +2365,7 @@ function App() {
     setIsImporting(true);
 
     try {
-      const importedTrip = parseTripImport(JSON.parse(jsonText));
+      const importedTrip = parseTripImport(JSON.parse(jsonText), activeWorkspaceId);
       if (!importedTrip) {
         setSaveMessage('Import needs a saved-trip export or stop list');
         return;
@@ -2075,11 +2396,11 @@ function App() {
           ...trips.filter((trip) => trip.id !== savedTrip.id),
         ]);
         setSaveBackend('database');
-        removeStorage(savedTripsKey);
+        removeWorkspaceSavedTrips(activeWorkspaceId);
         setSaveMessage(`Imported to database: ${savedTrip.name}`);
       } catch {
         setSaveBackend('local');
-        writeStorage(savedTripsKey, nextSavedTrips);
+        writeWorkspaceSavedTrips(activeWorkspaceId, nextSavedTrips);
         setSaveMessage(`Imported locally: ${importedTrip.name}`);
       }
     } catch {
@@ -2116,14 +2437,18 @@ function App() {
     try {
       const result = await requestRouteAssistant(getActiveTripForExport(), instruction);
       const now = new Date().toISOString();
-      const proposedTrip = normalizeTrip({
-        ...result.trip,
-        id: makeId('trip'),
-        createdAt: now,
-        updatedAt: now,
-        name: result.trip.name || `${activeTrip.name} AI draft`,
-        documents: activeTrip.documents,
-      });
+      const proposedTrip = normalizeTrip(
+        {
+          ...result.trip,
+          id: makeId('trip'),
+          workspaceId: activeWorkspaceId,
+          createdAt: now,
+          updatedAt: now,
+          name: result.trip.name || `${activeTrip.name} AI draft`,
+          documents: activeTrip.documents,
+        },
+        activeWorkspaceId,
+      );
 
       if (!proposedTrip) {
         throw new Error('INVALID_ROUTE_ASSISTANT_RESPONSE');
@@ -2151,7 +2476,9 @@ function App() {
 
   const saveTrip = async () => {
     const now = new Date().toISOString();
-    const tripToSave = normalizeTrip({ ...activeTrip, stops, updatedAt: now }) || activeTrip;
+    const tripToSave =
+      normalizeTrip({ ...activeTrip, workspaceId: activeWorkspaceId, stops, updatedAt: now }, activeWorkspaceId) ||
+      activeTrip;
     const nextSavedTrips = [
       tripToSave,
       ...savedTrips.filter((trip) => trip.id !== tripToSave.id),
@@ -2165,11 +2492,11 @@ function App() {
       const savedTrip = await saveTripToDatabase(tripToSave);
       setSavedTrips((trips) => mergeTripsByFreshness([savedTrip], trips));
       setSaveBackend('database');
-      removeStorage(savedTripsKey);
+      removeWorkspaceSavedTrips(activeWorkspaceId);
       setSaveMessage(`Saved to database ${formatDateTime(now)}`);
     } catch {
       setSaveBackend('local');
-      writeStorage(savedTripsKey, nextSavedTrips);
+      writeWorkspaceSavedTrips(activeWorkspaceId, nextSavedTrips);
       setSaveMessage(`Saved locally ${formatDateTime(now)}`);
     } finally {
       setIsSaving(false);
@@ -2183,7 +2510,7 @@ function App() {
   };
 
   const startNewTrip = () => {
-    const newTrip = createBlankTrip();
+    const newTrip = createBlankTrip(activeWorkspaceId);
     setDrivingMiles(null);
     setRoadDriveEstimates(null);
     setActiveTrip(newTrip);
@@ -2195,7 +2522,7 @@ function App() {
   };
 
   const loadTrip = (trip: Trip) => {
-    const nextTrip = normalizeTrip(trip);
+    const nextTrip = normalizeTrip(trip, activeWorkspaceId);
     if (!nextTrip) return;
 
     setDrivingMiles(null);
@@ -2213,18 +2540,69 @@ function App() {
     setSavedTrips(nextSavedTrips);
 
     if (saveBackend !== 'database') {
-      writeStorage(savedTripsKey, nextSavedTrips);
+      writeWorkspaceSavedTrips(activeWorkspaceId, nextSavedTrips);
       return;
     }
 
     try {
       await deleteTripFromDatabase(tripId);
-      removeStorage(savedTripsKey);
+      removeWorkspaceSavedTrips(activeWorkspaceId);
       setSaveMessage('Deleted from database');
     } catch {
       setSavedTrips(savedTrips);
       setSaveMessage('Delete failed');
     }
+  };
+
+  const loadWorkspace = (workspaceId: string) => {
+    if (!workspaces.some((workspace) => workspace.id === workspaceId)) return;
+
+    const nextTrip = createInitialTripForWorkspace(workspaceId);
+
+    setActiveWorkspaceId(workspaceId);
+    setSavedTrips(readSavedTrips(workspaceId));
+    setActiveTrip(nextTrip);
+    setSelectedStopId(nextTrip.stops[0]?.id || null);
+    setSelectedDocumentId(nextTrip.documents[0]?.id || null);
+    setDrivingMiles(null);
+    setRoadDriveEstimates(null);
+    setRouteAssistantPrompt('');
+    setRouteAssistantMessage('');
+    setSaveMessage('');
+    setSaveBackend('checking');
+    setFitSignal((value) => value + 1);
+  };
+
+  const createWorkspace = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    const name = workspaceNameDraft.trim();
+    if (!name) return;
+
+    const now = new Date().toISOString();
+    const workspace: Workspace = {
+      id: makeId('workspace'),
+      name,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const newTrip = createBlankTrip(workspace.id, `${name} trip`);
+
+    setWorkspaces((currentWorkspaces) => [workspace, ...currentWorkspaces]);
+    setWorkspaceNameDraft('');
+    setActiveWorkspaceId(workspace.id);
+    setSavedTrips([]);
+    setActiveTrip(newTrip);
+    setSelectedStopId(newTrip.stops[0]?.id || null);
+    setSelectedDocumentId(null);
+    setDrivingMiles(null);
+    setRoadDriveEstimates(null);
+    setCurrentView('editor');
+    setRouteAssistantPrompt('');
+    setRouteAssistantMessage('');
+    setSaveMessage(`Workspace created: ${workspace.name}`);
+    setSaveBackend('checking');
+    setFitSignal((value) => value + 1);
   };
 
   const handleRemoteChange = (event: ChangeEvent<HTMLInputElement>) => {
@@ -2244,6 +2622,11 @@ function App() {
     updateStop(selectedStop.id, { friendName: event.currentTarget.value });
   };
 
+  const handleTravelModeChange = (event: ChangeEvent<HTMLSelectElement>) => {
+    if (!selectedStop || selectedStopIndex <= 0) return;
+    updateStop(selectedStop.id, { travelMode: normalizeTravelMode(event.currentTarget.value) });
+  };
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -2256,6 +2639,37 @@ function App() {
             <p>{dateRange}</p>
           </span>
         </div>
+
+        <form className="workspace-switcher" onSubmit={createWorkspace} aria-label="Workspace selector">
+          <label htmlFor="workspace-select">Workspace</label>
+          <select
+            id="workspace-select"
+            value={activeWorkspace.id}
+            onChange={(event) => loadWorkspace(event.currentTarget.value)}
+          >
+            {workspaces.map((workspace) => (
+              <option key={workspace.id} value={workspace.id}>
+                {workspace.name}
+              </option>
+            ))}
+          </select>
+          <input
+            type="text"
+            value={workspaceNameDraft}
+            onChange={(event) => setWorkspaceNameDraft(event.currentTarget.value)}
+            placeholder="New idea or person"
+            aria-label="New workspace name"
+          />
+          <button
+            type="submit"
+            className="icon-button"
+            title="Create workspace"
+            aria-label="Create workspace"
+            disabled={!workspaceNameDraft.trim()}
+          >
+            <Plus size={18} />
+          </button>
+        </form>
 
         <nav className="view-tabs" aria-label="Primary views">
           <button
@@ -2356,7 +2770,7 @@ function App() {
               id="route-assistant-prompt"
               value={routeAssistantPrompt}
               onChange={(event) => setRouteAssistantPrompt(event.currentTarget.value)}
-              placeholder="Add a night in Denver or make the middle route more coastal; start/end stay locked"
+              placeholder="Add Denver by car, or mark a long leg as plane/boat; start/end stay locked"
             />
             <button
               type="submit"
@@ -2410,12 +2824,20 @@ function App() {
                 <span>Lodging</span>
               </div>
               <div>
+                <strong>{displayNonCarTravelCost}</strong>
+                <span>Plane/boat</span>
+              </div>
+              <div>
                 <strong>{displayTripTotal}</strong>
                 <span>Trip total</span>
               </div>
               <div>
                 <strong>{remoteStops}</strong>
                 <span>Remote</span>
+              </div>
+              <div>
+                <strong>{nonCarTravelLegs}</strong>
+                <span>Non-car</span>
               </div>
               <div>
                 <strong>{documents.length}</strong>
@@ -2511,6 +2933,15 @@ function App() {
             <ol className="stop-list">
               {stops.map((stop, stopIndex) => {
                 const driveEstimate = driveEstimateByStopId.get(stop.id);
+                const travelMode = stopIndex === 0 ? 'car' : stop.travelMode;
+                const travelSummary = formatTravelLegSummary(
+                  stop,
+                  stopIndex,
+                  stops,
+                  driveEstimate,
+                  gasPrice,
+                  fuelMpg,
+                );
                 const stopIsWeekend = isWeekendDate(stop.date);
                 const stopCardClassName = [
                   'stop-card',
@@ -2538,10 +2969,16 @@ function App() {
                           <CalendarDays size={14} />
                           {formatScheduleDate(stop.date)}
                         </small>
-                        {driveEstimate && (
+                        {stopIndex > 0 && (
                           <small className="drive-summary">
-                            <Route size={14} />
-                            {formatDriveSummary(driveEstimate, gasPrice, fuelMpg)}
+                            {travelMode === 'plane' ? (
+                              <Plane size={14} />
+                            ) : travelMode === 'boat' ? (
+                              <Ship size={14} />
+                            ) : (
+                              <Car size={14} />
+                            )}
+                            {travelSummary}
                           </small>
                         )}
                         {stop.sleepingArrangement !== 'camping' && (
@@ -2554,6 +2991,7 @@ function App() {
                           <span className={`stop-tag ${getSleepClass(stop.sleepingArrangement)}`}>
                             {formatSleepingArrangementLabel(stop.sleepingArrangement)}
                           </span>
+                          {travelMode !== 'car' && <span className="stop-tag travel">{getTravelModeLabel(travelMode)}</span>}
                           {stop.remoteWork && <span className="stop-tag remote">Remote work</span>}
                           {stopIsWeekend && <span className="stop-tag weekend">Weekend</span>}
                         </span>
@@ -2676,6 +3114,28 @@ function App() {
                 onChange={(event) => updateStop(selectedStop.id, { notes: event.currentTarget.value })}
                 rows={5}
               />
+
+              <div className="travel-section">
+                <label htmlFor="travel-mode">Travel from previous stop</label>
+                <select
+                  id="travel-mode"
+                  value={selectedStopIndex <= 0 ? 'car' : selectedStop.travelMode}
+                  onChange={handleTravelModeChange}
+                  disabled={selectedStopIndex <= 0}
+                >
+                  <option value="car">Car</option>
+                  <option value="plane">Plane</option>
+                  <option value="boat">Boat</option>
+                </select>
+                <p className="travel-hint">
+                  {selectedStopIndex <= 0
+                    ? 'This is the starting point.'
+                    : selectedStopTravelSummary}
+                  {selectedStopIndex > 0 && selectedStop.travelMode !== 'car'
+                    ? ' Planning estimate added to the trip total.'
+                    : ''}
+                </p>
+              </div>
 
               <div className="sleeping-section">
                 <label htmlFor="sleeping-arrangement">Sleeping arrangement</label>
@@ -2875,7 +3335,10 @@ function App() {
           <section className="saved-page-header">
             <span>
               <h2>Saved Trips</h2>
-              <p>{saveBackend === 'database' ? 'Database-backed trip library' : 'Local trip library'}</p>
+              <p>
+                {saveBackend === 'database' ? 'Database-backed trip library' : 'Local trip library'} for{' '}
+                {activeWorkspace.name}
+              </p>
             </span>
             <div className="saved-page-actions">
               <button type="button" className="secondary-button" onClick={startNewTrip}>
@@ -3162,6 +3625,18 @@ function MapCanvas({
       return undefined;
     }
 
+    const routeChunks = splitStopsForDirections(stops);
+    if (!routeChunks.length) {
+      setRoutePaths([]);
+      setRouteHotelSearchPoints([]);
+      setRouteStatus('idle');
+      setRouteError('');
+      setRouteNoticeDismissed(false);
+      onRouteDistanceChange(0);
+      onDriveEstimatesChange([]);
+      return undefined;
+    }
+
     const cachedRoute = readCachedRoute(directionsKey, stops);
     if (cachedRoute) {
       setRoutePaths(cachedRoute.routePaths);
@@ -3193,8 +3668,6 @@ function MapCanvas({
     onDriveEstimatesChange(null);
 
     const timeoutId = window.setTimeout(() => {
-      const chunks = splitStopsForDirections(stops);
-
       google.maps
         .importLibrary('routes')
         .then((library) => {
@@ -3203,7 +3676,7 @@ function MapCanvas({
             throw new Error('ROUTES_LIBRARY_UNAVAILABLE');
           }
 
-          return Promise.all(chunks.map((chunk) => requestRoadRoute(routeLibrary, chunk)));
+          return Promise.all(routeChunks.map((chunk) => requestRoadRoute(routeLibrary, chunk)));
         })
         .then((routes) => {
           if (canceled) return;
@@ -3582,6 +4055,9 @@ function MapCanvas({
                   <span className={`stop-tag ${getSleepClass(selectedStop.sleepingArrangement)}`}>
                     {formatSleepingArrangementLabel(selectedStop.sleepingArrangement)}
                   </span>
+                  {selectedStop.order > 1 && selectedStop.travelMode !== 'car' && (
+                    <span className="stop-tag travel">{getTravelModeLabel(selectedStop.travelMode)}</span>
+                  )}
                   {selectedStop.remoteWork && <span className="stop-tag remote">Remote work</span>}
                   {isWeekendDate(selectedStop.date) && <span className="stop-tag weekend">Weekend</span>}
                 </span>
