@@ -17,9 +17,10 @@ const port = Number(process.env.PORT) || 3000;
 const databaseUrl = process.env.DATABASE_URL;
 const openaiToken = process.env.OPENAI_TOKEN || process.env.OPENAI_API_KEY;
 const openaiModel = process.env.OPENAI_MODEL || 'gpt-5-mini';
+const openaiTripStarterModel = process.env.OPENAI_TRIP_STARTER_MODEL || 'gpt-5';
 const maxBodyBytes = 8 * 1024 * 1024;
 const maxRouteAssistantInstructionChars = 12000;
-const routeAssistantCooldownMs = 30 * 1000;
+const aiRequestCooldownMs = 30 * 1000;
 const defaultWorkspaceId = 'workspace-default';
 const tripExportFormat = 'road-trip-planner.saved-trip.v1';
 const maxFileSharedTrips = 500;
@@ -106,7 +107,7 @@ const mimeTypes = new Map([
 let databaseSetupError = null;
 let fileSharedTripsReady = false;
 let fileSharedTripsWriteQueue = Promise.resolve();
-let nextRouteAssistantAllowedAt = 0;
+let nextAiRequestAllowedAt = 0;
 const fileSharedTrips = new Map();
 
 function normalizeSleepingArrangement(value) {
@@ -815,6 +816,51 @@ function getRouteAssistantTripInput(trip) {
   };
 }
 
+function createTripStarterBaseTrip() {
+  const now = new Date().toISOString();
+
+  return normalizeTrip({
+    id: `trip-starter-${Date.now()}`,
+    workspaceId: defaultWorkspaceId,
+    name: 'AI trip draft',
+    notes: '',
+    createdAt: now,
+    updatedAt: now,
+    stops: [
+      {
+        id: 'stop-1',
+        order: 1,
+        date: '',
+        label: 'Starting point',
+        lat: 39.8283,
+        lng: -98.5795,
+        notes: '',
+        remoteWork: false,
+        sleepingArrangement: 'camping',
+        friendName: '',
+        travelMode: 'car',
+      },
+    ],
+    documents: [],
+  });
+}
+
+function enforceTripStarterRules(baseTrip, proposedTrip, instruction) {
+  const stops = enforceTravelModeRules(baseTrip, proposedTrip.stops, instruction).map((stop, index) => ({
+    ...stop,
+    order: index + 1,
+    sleepingArrangement: stop.sleepingArrangement === 'hotel' ? 'hotel' : 'camping',
+    friendName: '',
+  }));
+
+  return normalizeTrip({
+    ...proposedTrip,
+    workspaceId: defaultWorkspaceId,
+    documents: [],
+    stops,
+  }) || proposedTrip;
+}
+
 function extractOpenAIText(payload) {
   if (typeof payload?.output_text === 'string') return payload.output_text;
 
@@ -897,9 +943,9 @@ function normalizeRouteProposal(proposal, originalTrip) {
   };
 }
 
-function logInvalidRouteAssistantResponse(payload, outputText) {
+function logInvalidAiTripResponse(source, payload, outputText) {
   console.error(
-    'OpenAI route assistant returned invalid structured output:',
+    `OpenAI ${source} returned invalid structured output:`,
     JSON.stringify({
       status: payload?.status,
       incomplete_details: payload?.incomplete_details,
@@ -936,10 +982,10 @@ function readJsonBody(request) {
   });
 }
 
-function checkRouteAssistantRateLimit(response) {
+function checkAiRequestRateLimit(response, error = 'AI_RATE_LIMITED') {
   const now = Date.now();
-  if (now < nextRouteAssistantAllowedAt) {
-    const retryAfterSeconds = Math.ceil((nextRouteAssistantAllowedAt - now) / 1000);
+  if (now < nextAiRequestAllowedAt) {
+    const retryAfterSeconds = Math.ceil((nextAiRequestAllowedAt - now) / 1000);
 
     response.writeHead(429, {
       'content-type': 'application/json; charset=utf-8',
@@ -947,24 +993,124 @@ function checkRouteAssistantRateLimit(response) {
       'retry-after': String(retryAfterSeconds),
     });
     response.end(`${JSON.stringify({
-      error: 'ROUTE_ASSISTANT_RATE_LIMITED',
+      error,
       retryAfterSeconds,
     })}\n`);
     return false;
   }
 
-  nextRouteAssistantAllowedAt = now + routeAssistantCooldownMs;
+  nextAiRequestAllowedAt = now + aiRequestCooldownMs;
   return true;
 }
 
 async function handleApi(request, response, url) {
+  if (request.method === 'POST' && url.pathname === '/api/trip-starter') {
+    if (!openaiToken) {
+      sendJson(response, 503, { error: 'OPENAI_NOT_CONFIGURED' });
+      return;
+    }
+
+    const body = await readJsonBody(request);
+    const instruction = typeof body.instruction === 'string' ? body.instruction.trim() : '';
+    const maxOneDayCarDriveHours = normalizeMaxCarLegHours(body.settings?.maxCarLegHours);
+
+    if (!instruction || instruction.length > maxRouteAssistantInstructionChars) {
+      sendJson(response, 400, { error: 'INVALID_TRIP_STARTER_REQUEST' });
+      return;
+    }
+
+    if (!checkAiRequestRateLimit(response, 'TRIP_STARTER_RATE_LIMITED')) return;
+
+    const baseTrip = createTripStarterBaseTrip();
+    if (!baseTrip) {
+      sendJson(response, 500, { error: 'SERVER_ERROR' });
+      return;
+    }
+
+    const openaiResponse = await fetch('https://api.openai.com/v1/responses', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${openaiToken}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: openaiTripStarterModel,
+        instructions: [
+          'You are a road-trip planner creating the first draft of a new trip from a long user prompt.',
+          'Return only the requested structured JSON.',
+          'Generate a complete but editable itinerary with a useful trip name, concise notes, and ordered stops.',
+          'Plan for a passenger car using public roads by default. Do not add non-car travel unless the user explicitly asks for it.',
+          'travelMode means how the traveler gets from the previous stop to this stop. The first stop must use travelMode=car. Use travelMode=car, plane, or boat only.',
+          'For car legs, every stop must be realistically reachable by car from the previous stop in one day. Prefer stops near plausible driving corridors.',
+          'For plane or boat legs, use plausible airport, ferry, or dock-adjacent destinations and mention the non-car leg in notes. The app will estimate plane/boat cost separately.',
+          `Every car leg must be traversable in one day: target roughly ${targetCarLegMiles} miles or less when practical, and do not create car legs over ${maxOneDayCarDriveHours} driving hours.`,
+          `If a requested car route would exceed ${maxOneDayCarDriveHours} driving hours, add intermediate overnight stops with travelMode=car rather than leaving one oversized leg. Only use plane or boat for that leg if the user explicitly asks for non-car travel.`,
+          "Plan each road-trip date around one primary car-driving session that ends at that date's overnight stop.",
+          'Do not create multiple ordinary car-driving shifts on the same date just to chain route segments or work around the daily drive limit.',
+          `Two car-driving sessions on one date are allowed only when the middle stop is a real event, reservation, meetup, scenic stop, attraction, meal, or rest break, the middle stop notes explain that purpose, and total same-date car driving stays within ${maxOneDayCarDriveHours} hours.`,
+          'Do not invent fake events solely to justify split driving. If a day would need multiple normal driving shifts, move one stop to another date or add an overnight stop instead.',
+          'Do not create three or more car-driving sessions on one date. Avoid adding split-drive sessions on remote-work dates.',
+          'Use remoteWork=true only for dates the user explicitly describes as remote-work days; otherwise use remoteWork=false.',
+          'Use approximate latitude and longitude for well-known places when adding stops.',
+          'Every stop must have order starting at 1, a human-readable label, numeric lat/lng, notes, date, remoteWork, sleepingArrangement, friendName, and travelMode.',
+          'sleepingArrangement must be camping, hotel, or friend. Default new stops to camping unless the user explicitly asks for hotel.',
+          'Do not use sleepingArrangement=friend in a brand-new AI trip because there is no existing route friend stay to verify. Use camping instead and mention that friend stays can be added manually once the friend/city is known.',
+          'For all non-friend stays, friendName must be an empty string.',
+          'Keep dates as YYYY-MM-DD strings when dates are known; otherwise use an empty string.',
+          'Do not save anything. This is only an initial draft trip for the user to review.',
+        ].join(' '),
+        input: JSON.stringify({
+          instruction,
+          drivingPlanningContext: buildDrivingPlanningContext(baseTrip, maxOneDayCarDriveHours),
+        }),
+        max_output_tokens: 18000,
+        text: {
+          format: {
+            type: 'json_schema',
+            name: 'route_trip_proposal',
+            strict: true,
+            schema: routeProposalSchema,
+          },
+        },
+      }),
+    });
+
+    if (!openaiResponse.ok) {
+      const errorText = await openaiResponse.text();
+      console.error('OpenAI trip starter failed:', errorText);
+      sendJson(response, 502, { error: 'OPENAI_REQUEST_FAILED' });
+      return;
+    }
+
+    const payload = await openaiResponse.json();
+    const outputText = extractOpenAIText(payload);
+    const proposal = normalizeRouteProposal(parseRouteProposalText(outputText), baseTrip);
+
+    if (!proposal) {
+      logInvalidAiTripResponse('trip starter', payload, outputText);
+      sendJson(response, 502, { error: 'INVALID_OPENAI_RESPONSE' });
+      return;
+    }
+
+    const starterTrip = enforceTripStarterRules(baseTrip, proposal.trip, instruction);
+    const travelSummary = instructionAllowsNonCarTravel(instruction, baseTrip)
+      ? 'Car-first planning stayed on, with requested non-car legs allowed.'
+      : 'Planned for passenger-car driving.';
+
+    sendJson(response, 200, {
+      summary: `${proposal.summary} ${travelSummary} Friend stays were not invented for this new trip draft.`,
+      trip: starterTrip,
+    });
+    return;
+  }
+
   if (request.method === 'POST' && url.pathname === '/api/route-assistant') {
     if (!openaiToken) {
       sendJson(response, 503, { error: 'OPENAI_NOT_CONFIGURED' });
       return;
     }
 
-    if (!checkRouteAssistantRateLimit(response)) return;
+    if (!checkAiRequestRateLimit(response, 'ROUTE_ASSISTANT_RATE_LIMITED')) return;
 
     const body = await readJsonBody(request);
     const instruction = typeof body.instruction === 'string' ? body.instruction.trim() : '';
@@ -1045,7 +1191,7 @@ async function handleApi(request, response, url) {
     const proposal = normalizeRouteProposal(parseRouteProposalText(outputText), trip);
 
     if (!proposal) {
-      logInvalidRouteAssistantResponse(payload, outputText);
+      logInvalidAiTripResponse('route assistant', payload, outputText);
       sendJson(response, 502, { error: 'INVALID_OPENAI_RESPONSE' });
       return;
     }

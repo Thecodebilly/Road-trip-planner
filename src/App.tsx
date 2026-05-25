@@ -189,7 +189,7 @@ type SharedTripResponse = {
 
 type SaveBackend = 'checking' | 'database' | 'local';
 type AppView = 'editor' | 'saved';
-type NewTripMode = 'setup' | 'json';
+type NewTripMode = 'setup' | 'ai' | 'json';
 
 type NewTripDraft = {
   startDate: string;
@@ -910,6 +910,48 @@ async function requestRouteAssistant(
   const proposedTrip = normalizeTrip(result.trip, trip.workspaceId);
   if (!proposedTrip || typeof result.summary !== 'string') {
     throw new Error('INVALID_ROUTE_ASSISTANT_RESPONSE');
+  }
+
+  return {
+    summary: result.summary,
+    trip: proposedTrip,
+  };
+}
+
+async function requestTripStarter(
+  instruction: string,
+  settings: RouteAssistantSettings,
+  workspaceId = defaultWorkspaceId,
+): Promise<RouteAssistantResult> {
+  const response = await fetch('/api/trip-starter', {
+    method: 'POST',
+    headers: {
+      accept: 'application/json',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ instruction, settings }),
+  });
+
+  if (!response.ok) {
+    if (response.status === 429) {
+      let retryAfterSeconds = Number(response.headers.get('retry-after'));
+      try {
+        const payload = await response.json();
+        retryAfterSeconds = Number(payload.retryAfterSeconds) || retryAfterSeconds;
+      } catch {
+        // Keep the Retry-After header fallback.
+      }
+
+      throw new Error(`TRIP_STARTER_RATE_LIMITED_${Math.max(1, Math.ceil(retryAfterSeconds || 30))}`);
+    }
+
+    throw new Error(`TRIP_STARTER_${response.status}`);
+  }
+
+  const result = await response.json();
+  const proposedTrip = normalizeTrip(result.trip, workspaceId);
+  if (!proposedTrip || typeof result.summary !== 'string') {
+    throw new Error('INVALID_TRIP_STARTER_RESPONSE');
   }
 
   return {
@@ -2478,6 +2520,10 @@ function App() {
   const [routeAssistantPrompt, setRouteAssistantPrompt] = useState('');
   const [routeAssistantMessage, setRouteAssistantMessage] = useState('');
   const [isRouteAssistantWorking, setIsRouteAssistantWorking] = useState(false);
+  const [newTripPrompt, setNewTripPrompt] = useState('');
+  const [newTripAssistantMessage, setNewTripAssistantMessage] = useState('');
+  const [isNewTripAssistantWorking, setIsNewTripAssistantWorking] = useState(false);
+  const [newTripFormatCopied, setNewTripFormatCopied] = useState(false);
   const [importJsonText, setImportJsonText] = useState('');
   const [showImportModal, setShowImportModal] = useState(false);
   const [showNewTripModal, setShowNewTripModal] = useState(false);
@@ -3084,6 +3130,9 @@ function App() {
         setShowNewTripModal(false);
         setNewTripMode('setup');
         setImportJsonText('');
+        setNewTripPrompt('');
+        setNewTripAssistantMessage('');
+        setNewTripFormatCopied(false);
       }
 
       try {
@@ -3213,12 +3262,24 @@ function App() {
   const startNewTrip = () => {
     setNewTripDraft(createEmptyNewTripDraft());
     setImportJsonText('');
+    setNewTripPrompt('');
+    setNewTripAssistantMessage('');
+    setNewTripFormatCopied(false);
     setNewTripMode('setup');
     setShowNewTripModal(true);
   };
 
   const updateNewTripDraft = (field: keyof NewTripDraft, value: string) => {
     setNewTripDraft((draft) => ({ ...draft, [field]: value }));
+  };
+
+  const copyNewTripJsonFormat = async () => {
+    try {
+      await copyText(exportFormatExample);
+      setNewTripFormatCopied(true);
+    } catch {
+      setNewTripFormatCopied(false);
+    }
   };
 
   const createNewTripFromDraft = async (event: FormEvent<HTMLFormElement>) => {
@@ -3298,6 +3359,58 @@ function App() {
       setFitSignal((value) => value + 1);
     } finally {
       setIsCreatingNewTrip(false);
+    }
+  };
+
+  const generateNewTripWithAi = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+
+    const instruction = newTripPrompt.trim();
+    if (!instruction) return;
+
+    setIsNewTripAssistantWorking(true);
+    setNewTripAssistantMessage('Planning an initial trip...');
+
+    try {
+      const result = await requestTripStarter(instruction, { maxCarLegHours }, activeWorkspaceId);
+      const now = new Date().toISOString();
+      const generatedTrip = normalizeTrip(
+        {
+          ...result.trip,
+          id: makeId('trip'),
+          workspaceId: activeWorkspaceId,
+          documents: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+        activeWorkspaceId,
+      );
+
+      if (!generatedTrip) {
+        throw new Error('INVALID_TRIP_STARTER_RESPONSE');
+      }
+
+      setDrivingMiles(null);
+      setRoadDriveEstimates(null);
+      setActiveTrip(generatedTrip);
+      setSelectedStopId(generatedTrip.stops[0]?.id || null);
+      setSelectedDocumentId(null);
+      setCurrentView('editor');
+      setShowNewTripModal(false);
+      setNewTripPrompt('');
+      setNewTripAssistantMessage('');
+      clearSavedRouteUrl();
+      setFitSignal((value) => value + 1);
+      setSaveMessage(`${result.summary} Save the draft when ready.`);
+    } catch (error) {
+      const message = error instanceof Error && error.message.includes('503')
+        ? 'AI trip starter needs OPENAI_TOKEN on the server.'
+        : error instanceof Error && error.message.startsWith('TRIP_STARTER_RATE_LIMITED_')
+          ? `AI trip starter is cooling down. Try again in ${error.message.split('_').pop()} seconds.`
+          : 'AI trip draft failed. Try a smaller prompt.';
+      setNewTripAssistantMessage(message);
+    } finally {
+      setIsNewTripAssistantWorking(false);
     }
   };
 
@@ -3398,6 +3511,8 @@ function App() {
     setRoadDriveEstimates(null);
     setRouteAssistantPrompt('');
     setRouteAssistantMessage('');
+    setNewTripPrompt('');
+    setNewTripAssistantMessage('');
     setSaveMessage('');
     setSaveBackend('checking');
     clearSavedRouteUrl(true);
@@ -3431,6 +3546,8 @@ function App() {
     setCurrentView('editor');
     setRouteAssistantPrompt('');
     setRouteAssistantMessage('');
+    setNewTripPrompt('');
+    setNewTripAssistantMessage('');
     setSaveMessage(`Workspace created: ${workspace.name}`);
     setSaveBackend('checking');
     clearSavedRouteUrl(true);
@@ -4373,6 +4490,16 @@ function App() {
               <button
                 type="button"
                 role="tab"
+                aria-selected={newTripMode === 'ai'}
+                className={newTripMode === 'ai' ? 'secondary-button active' : 'secondary-button'}
+                onClick={() => setNewTripMode('ai')}
+              >
+                <Sparkles size={17} />
+                <span>AI</span>
+              </button>
+              <button
+                type="button"
+                role="tab"
                 aria-selected={newTripMode === 'json'}
                 className={newTripMode === 'json' ? 'secondary-button active' : 'secondary-button'}
                 onClick={() => setNewTripMode('json')}
@@ -4445,9 +4572,53 @@ function App() {
                   </button>
                 </footer>
               </form>
+            ) : newTripMode === 'ai' ? (
+              <form className="new-trip-ai-form" onSubmit={generateNewTripWithAi}>
+                <label htmlFor="new-trip-ai-prompt">Trip prompt</label>
+                <textarea
+                  id="new-trip-ai-prompt"
+                  value={newTripPrompt}
+                  onChange={(event) => setNewTripPrompt(event.currentTarget.value)}
+                  placeholder="Plan a two-week camping-focused road trip from Jacksonville to Denver in June, with remote work on weekdays, national parks, and no car leg over 10 hours."
+                  rows={10}
+                  maxLength={routeAssistantPromptMaxLength}
+                />
+                {newTripAssistantMessage && (
+                  <p className="new-trip-ai-message">{newTripAssistantMessage}</p>
+                )}
+                <footer className="json-modal-actions">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => setShowNewTripModal(false)}
+                    disabled={isNewTripAssistantWorking}
+                  >
+                    <X size={17} />
+                    <span>Cancel</span>
+                  </button>
+                  <button
+                    type="submit"
+                    className="primary-button"
+                    disabled={isNewTripAssistantWorking || !newTripPrompt.trim()}
+                  >
+                    <Sparkles size={17} />
+                    <span>{isNewTripAssistantWorking ? 'Planning' : 'Generate trip'}</span>
+                  </button>
+                </footer>
+              </form>
             ) : (
               <form className="import-form new-trip-import-form" onSubmit={importPastedTrip}>
-                <label htmlFor="new-trip-import-json">Saved trip JSON</label>
+                <div className="new-trip-json-heading">
+                  <label htmlFor="new-trip-import-json">Saved trip JSON</label>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={copyNewTripJsonFormat}
+                  >
+                    <Copy size={16} />
+                    <span>{newTripFormatCopied ? 'Copied' : 'Copy format'}</span>
+                  </button>
+                </div>
                 <textarea
                   id="new-trip-import-json"
                   value={importJsonText}
