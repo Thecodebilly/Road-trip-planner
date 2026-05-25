@@ -1,7 +1,8 @@
 import 'dotenv/config';
 
+import { randomBytes } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
-import { readFile, stat } from 'node:fs/promises';
+import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -11,12 +12,17 @@ const { Pool } = pg;
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.join(__dirname, 'dist');
+const dataDir = path.join(__dirname, '.data');
+const sharedTripsFile = path.join(dataDir, 'shared-trips.json');
 const port = Number(process.env.PORT) || 3000;
 const databaseUrl = process.env.DATABASE_URL;
 const openaiToken = process.env.OPENAI_TOKEN || process.env.OPENAI_API_KEY;
 const openaiModel = process.env.OPENAI_MODEL || 'gpt-5-mini';
 const maxBodyBytes = 8 * 1024 * 1024;
+const maxRouteAssistantInstructionChars = 12000;
 const defaultWorkspaceId = 'workspace-default';
+const tripExportFormat = 'road-trip-planner.saved-trip.v1';
+const maxFileSharedTrips = 500;
 const targetCarLegMiles = 450;
 const estimatedCarAverageMph = 55;
 const defaultMaxOneDayCarDriveHours = 14;
@@ -98,6 +104,9 @@ const mimeTypes = new Map([
 ]);
 
 let databaseSetupError = null;
+let fileSharedTripsReady = false;
+let fileSharedTripsWriteQueue = Promise.resolve();
+const fileSharedTrips = new Map();
 
 function normalizeSleepingArrangement(value) {
   return ['camping', 'hotel', 'friend'].includes(value) ? value : 'camping';
@@ -161,6 +170,16 @@ const databaseReady = pool
 
       CREATE INDEX IF NOT EXISTS saved_trips_updated_at_idx
         ON saved_trips (updated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS shared_trips (
+        id text PRIMARY KEY,
+        export jsonb NOT NULL,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        CONSTRAINT shared_trips_export_object CHECK (jsonb_typeof(export) = 'object')
+      );
+
+      CREATE INDEX IF NOT EXISTS shared_trips_created_at_idx
+        ON shared_trips (created_at DESC);
     `).catch((error) => {
       databaseSetupError = error;
       console.error('Database setup failed:', error);
@@ -250,6 +269,147 @@ function normalizeTrip(value) {
     createdAt: typeof value.createdAt === 'string' ? value.createdAt : now,
     updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : now,
   };
+}
+
+function normalizeSharedTripExport(value) {
+  if (!value || typeof value !== 'object') return null;
+
+  const exportedAt = typeof value.exportedAt === 'string' ? value.exportedAt : new Date().toISOString();
+  const trip = normalizeTrip(value.trip || value);
+  if (!trip) return null;
+
+  const sharedTrip = normalizeTrip({
+    ...trip,
+    documents: [],
+  });
+
+  if (!sharedTrip) return null;
+
+  return {
+    format: tripExportFormat,
+    exportedAt,
+    trip: sharedTrip,
+  };
+}
+
+function isShareId(value) {
+  return typeof value === 'string' && /^[a-f0-9]{10,20}$/i.test(value);
+}
+
+function createShareId() {
+  return randomBytes(5).toString('hex');
+}
+
+async function canUseDatabase() {
+  if (!pool) return false;
+
+  await databaseReady;
+  return !databaseSetupError;
+}
+
+async function loadFileSharedTrips() {
+  if (fileSharedTripsReady) return;
+
+  fileSharedTripsReady = true;
+
+  try {
+    const raw = await readFile(sharedTripsFile, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return;
+
+    parsed.forEach((record) => {
+      const id = Array.isArray(record) ? record[0] : record?.id;
+      const exportedTrip = Array.isArray(record) ? record[1] : record?.export;
+      const normalizedExport = normalizeSharedTripExport(exportedTrip);
+      if (isShareId(id) && normalizedExport) {
+        fileSharedTrips.set(id, normalizedExport);
+      }
+    });
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      console.error('Shared trip file load failed:', error);
+    }
+  }
+}
+
+async function persistFileSharedTrips() {
+  const records = Array.from(fileSharedTrips.entries()).slice(-maxFileSharedTrips);
+
+  await mkdir(dataDir, { recursive: true });
+  await writeFile(
+    sharedTripsFile,
+    `${JSON.stringify(records.map(([id, exportedTrip]) => ({ id, export: exportedTrip })), null, 2)}\n`,
+    'utf8',
+  );
+}
+
+function queueFileSharedTripsSave() {
+  fileSharedTripsWriteQueue = fileSharedTripsWriteQueue
+    .catch(() => undefined)
+    .then(() => persistFileSharedTrips());
+
+  return fileSharedTripsWriteQueue;
+}
+
+async function fileShareIdExists(id) {
+  await loadFileSharedTrips();
+  return fileSharedTrips.has(id);
+}
+
+async function databaseShareIdExists(id) {
+  const result = await pool.query('SELECT 1 FROM shared_trips WHERE id = $1', [id]);
+  return Boolean(result.rowCount);
+}
+
+async function createUniqueShareId(useDatabase) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const id = createShareId();
+    const exists = useDatabase ? await databaseShareIdExists(id) : await fileShareIdExists(id);
+
+    if (!exists) return id;
+  }
+
+  throw new Error('SHARE_ID_COLLISION');
+}
+
+async function saveSharedTripExport(exportedTrip) {
+  const useDatabase = await canUseDatabase();
+  const id = await createUniqueShareId(useDatabase);
+
+  if (useDatabase) {
+    await pool.query(
+      `
+        INSERT INTO shared_trips (id, export)
+        VALUES ($1, $2::jsonb)
+      `,
+      [id, JSON.stringify(exportedTrip)],
+    );
+
+    return { id, durable: true };
+  }
+
+  await loadFileSharedTrips();
+  fileSharedTrips.set(id, exportedTrip);
+  while (fileSharedTrips.size > maxFileSharedTrips) {
+    const oldestId = fileSharedTrips.keys().next().value;
+    if (!oldestId) break;
+    fileSharedTrips.delete(oldestId);
+  }
+  await queueFileSharedTripsSave();
+
+  return { id, durable: true };
+}
+
+async function readSharedTripExport(id) {
+  if (!isShareId(id)) return null;
+
+  if (await canUseDatabase()) {
+    const result = await pool.query('SELECT export FROM shared_trips WHERE id = $1', [id]);
+    return normalizeSharedTripExport(result.rows[0]?.export);
+  }
+
+  await loadFileSharedTrips();
+  return normalizeSharedTripExport(fileSharedTrips.get(id));
 }
 
 function isDateOnly(value) {
@@ -594,7 +754,7 @@ async function handleApi(request, response, url) {
     const instruction = typeof body.instruction === 'string' ? body.instruction.trim() : '';
     const trip = normalizeTrip(body.trip);
 
-    if (!instruction || instruction.length > 1600 || !trip) {
+    if (!instruction || instruction.length > maxRouteAssistantInstructionChars || !trip) {
       sendJson(response, 400, { error: 'INVALID_ROUTE_ASSISTANT_REQUEST' });
       return;
     }
@@ -683,6 +843,37 @@ async function handleApi(request, response, url) {
       summary: `${proposal.summary} ${travelSummary} Start/end date and locations stayed locked. Remote-work dates and friend stays were kept constrained.`,
       trip: anchoredTrip,
     });
+    return;
+  }
+
+  if (request.method === 'POST' && url.pathname === '/api/shared-trips') {
+    const exportedTrip = normalizeSharedTripExport(await readJsonBody(request));
+    if (!exportedTrip) {
+      sendJson(response, 400, { error: 'INVALID_SHARED_TRIP' });
+      return;
+    }
+
+    const result = await saveSharedTripExport(exportedTrip);
+    sendJson(response, 201, result);
+    return;
+  }
+
+  const sharedTripMatch = url.pathname.match(/^\/api\/shared-trips\/([^/]+)$/);
+  if (sharedTripMatch && request.method === 'GET') {
+    const shareId = decodeURIComponent(sharedTripMatch[1]);
+    const exportedTrip = await readSharedTripExport(shareId);
+
+    if (!exportedTrip) {
+      sendJson(response, 404, { error: 'SHARED_TRIP_NOT_FOUND' });
+      return;
+    }
+
+    sendJson(response, 200, exportedTrip);
+    return;
+  }
+
+  if (sharedTripMatch) {
+    sendJson(response, 405, { error: 'METHOD_NOT_ALLOWED' });
     return;
   }
 

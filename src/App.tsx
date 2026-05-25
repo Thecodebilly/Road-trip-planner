@@ -158,6 +158,34 @@ type ExportedTrip = {
   trip: Trip;
 };
 
+type CompactSharedTripStop = [
+  date: string,
+  label: string,
+  lat: number,
+  lng: number,
+  notes?: string,
+  remoteWork?: 0 | 1,
+  sleepingArrangement?: SleepingArrangement | '',
+  friendName?: string,
+  travelMode?: TravelMode | '',
+];
+
+type CompactSharedTrip = {
+  f: 'rtp2';
+  n: string;
+  o?: string;
+  s: CompactSharedTripStop[];
+};
+
+type TripShareSource =
+  | { kind: 'server'; id: string }
+  | { kind: 'payload'; payload: string };
+
+type SharedTripResponse = {
+  id: string;
+  durable?: boolean;
+};
+
 type SaveBackend = 'checking' | 'database' | 'local';
 type AppView = 'editor' | 'saved';
 
@@ -227,7 +255,13 @@ const hotelCacheKey = 'road-trip-planner.hotelCache.v1';
 const defaultWorkspaceId = 'workspace-default';
 const defaultTripId = 'default-2026-usa-itinerary';
 const tripExportFormat = 'road-trip-planner.saved-trip.v1';
-const tripShareParam = 'trip';
+const compactTripShareFormat = 'rtp2';
+const savedRouteParam = 'route';
+const shortTripShareParam = 'share';
+const compactTripShareParam = 't';
+const legacyTripShareParam = 'trip';
+const sharePathPrefix = '/share/';
+const routeAssistantPromptMaxLength = 12000;
 const maxStopsPerDirectionsRequest = 25;
 const maxHotelSearchPoints = 8;
 const maxHotelCandidates = 12;
@@ -879,6 +913,85 @@ function createSharedTripExport(trip: Trip): ExportedTrip {
   };
 }
 
+function createCompactSharedTrip(trip: Trip): CompactSharedTrip {
+  const normalizedTrip = normalizeTrip(
+    {
+      ...trip,
+      documents: [],
+    },
+    trip.workspaceId,
+  ) || {
+    ...trip,
+    documents: [],
+  };
+
+  return {
+    f: compactTripShareFormat,
+    n: normalizedTrip.name,
+    o: normalizedTrip.notes || undefined,
+    s: normalizedTrip.stops.map((stop) => {
+      const fields: CompactSharedTripStop = [
+        stop.date,
+        stop.label,
+        roundPosition({ lat: stop.lat, lng: stop.lng }, 5).lat,
+        roundPosition({ lat: stop.lat, lng: stop.lng }, 5).lng,
+      ];
+      const optionals: CompactSharedTripStop[number][] = [
+        stop.notes || '',
+        stop.remoteWork ? 1 : 0,
+        stop.sleepingArrangement === 'camping' ? '' : stop.sleepingArrangement,
+        stop.friendName || '',
+        stop.travelMode === 'car' ? '' : stop.travelMode,
+      ];
+
+      while (optionals.length) {
+        const lastValue = optionals[optionals.length - 1];
+        if (lastValue !== '' && lastValue !== 0) break;
+        optionals.pop();
+      }
+
+      return [...fields, ...optionals] as CompactSharedTripStop;
+    }),
+  };
+}
+
+function parseCompactSharedTrip(candidate: unknown, workspaceId = defaultWorkspaceId) {
+  if (!candidate || typeof candidate !== 'object') return null;
+
+  const compactTrip = candidate as Partial<CompactSharedTrip>;
+  if (compactTrip.f !== compactTripShareFormat || !Array.isArray(compactTrip.s)) return null;
+
+  const now = new Date().toISOString();
+  const compactStops = compactTrip.s.filter((stop): stop is CompactSharedTripStop => Array.isArray(stop));
+  if (!compactStops.length) return null;
+
+  return normalizeTrip(
+    {
+      id: makeId('trip'),
+      workspaceId,
+      name: typeof compactTrip.n === 'string' && compactTrip.n ? compactTrip.n : 'Shared route',
+      notes: typeof compactTrip.o === 'string' ? compactTrip.o : '',
+      documents: [],
+      stops: compactStops.map((stop, index) => ({
+        id: makeId('stop'),
+        order: index + 1,
+        date: typeof stop[0] === 'string' ? stop[0] : '',
+        label: typeof stop[1] === 'string' ? stop[1] : 'Shared stop',
+        lat: Number(stop[2]),
+        lng: Number(stop[3]),
+        notes: typeof stop[4] === 'string' ? stop[4] : '',
+        remoteWork: stop[5] === 1,
+        sleepingArrangement: normalizeSleepingArrangement(stop[6]),
+        friendName: typeof stop[7] === 'string' ? stop[7] : '',
+        travelMode: normalizeTravelMode(stop[8]),
+      })),
+      createdAt: now,
+      updatedAt: now,
+    },
+    workspaceId,
+  );
+}
+
 function encodeBase64Url(value: string) {
   const bytes = new TextEncoder().encode(value);
   let binary = '';
@@ -915,6 +1028,9 @@ function parseTripImport(candidate: unknown, workspaceId = defaultWorkspaceId) {
     });
   }
 
+  const compactTrip = parseCompactSharedTrip(candidate, workspaceId);
+  if (compactTrip) return compactTrip;
+
   const exportedTrip = candidate as Partial<ExportedTrip>;
   if (exportedTrip.format !== tripExportFormat) return null;
   if (typeof exportedTrip.exportedAt !== 'string') return null;
@@ -928,23 +1044,136 @@ function parseTripImport(candidate: unknown, workspaceId = defaultWorkspaceId) {
   );
 }
 
-function createTripShareUrl(trip: Trip) {
+function createEncodedTripShareUrl(trip: Trip) {
   const url = new URL(window.location.href);
   const hashParams = new URLSearchParams();
 
-  url.searchParams.delete(tripShareParam);
-  hashParams.set(tripShareParam, encodeBase64Url(JSON.stringify(createSharedTripExport(trip))));
+  url.searchParams.delete(savedRouteParam);
+  url.searchParams.delete(shortTripShareParam);
+  url.searchParams.delete(compactTripShareParam);
+  url.searchParams.delete(legacyTripShareParam);
+  hashParams.set(compactTripShareParam, encodeBase64Url(JSON.stringify(createCompactSharedTrip(trip))));
   url.hash = hashParams.toString();
 
   return url.toString();
 }
 
-function getTripSharePayloadFromUrl() {
-  const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
-  const hashTrip = hashParams.get(tripShareParam);
-  if (hashTrip) return hashTrip;
+function createShortTripShareUrl(shareId: string) {
+  return new URL(`${sharePathPrefix}${encodeURIComponent(shareId)}`, window.location.origin).toString();
+}
 
-  return new URLSearchParams(window.location.search).get(tripShareParam);
+async function createServerTripShare(trip: Trip) {
+  const response = await fetch('/api/shared-trips', {
+    method: 'POST',
+    headers: {
+      accept: 'application/json',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(createSharedTripExport(trip)),
+  });
+
+  if (!response.ok) {
+    throw new Error(`CREATE_SHARED_TRIP_${response.status}`);
+  }
+
+  const result = (await response.json()) as Partial<SharedTripResponse>;
+  if (typeof result.id !== 'string' || !result.id) {
+    throw new Error('INVALID_SHARED_TRIP_RESPONSE');
+  }
+
+  return result.id;
+}
+
+async function fetchServerTripShare(shareId: string, workspaceId = defaultWorkspaceId) {
+  const response = await fetch(`/api/shared-trips/${encodeURIComponent(shareId)}`, {
+    headers: { accept: 'application/json' },
+  });
+
+  if (!response.ok) {
+    throw new Error(`GET_SHARED_TRIP_${response.status}`);
+  }
+
+  return parseTripImport(await response.json(), workspaceId);
+}
+
+function getSavedRouteIdFromUrl() {
+  const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  const hashRoute = hashParams.get(savedRouteParam);
+  if (hashRoute) return hashRoute;
+
+  return new URLSearchParams(window.location.search).get(savedRouteParam) || '';
+}
+
+function setSavedRouteUrl(tripId: string, replace = false) {
+  const url = new URL(window.location.href);
+  const hashParams = new URLSearchParams(url.hash.replace(/^#/, ''));
+
+  [shortTripShareParam, compactTripShareParam, legacyTripShareParam].forEach((param) => {
+    hashParams.delete(param);
+    url.searchParams.delete(param);
+  });
+  hashParams.set(savedRouteParam, tripId);
+  url.searchParams.delete(savedRouteParam);
+
+  const nextHash = hashParams.toString();
+  const nextUrl = `${url.pathname}${url.search}${nextHash ? `#${nextHash}` : ''}`;
+  const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+
+  if (nextUrl === currentUrl) return;
+
+  if (replace) {
+    window.history.replaceState(null, '', nextUrl);
+  } else {
+    window.history.pushState(null, '', nextUrl);
+  }
+}
+
+function clearSavedRouteUrl(replace = false) {
+  const url = new URL(window.location.href);
+  const hashParams = new URLSearchParams(url.hash.replace(/^#/, ''));
+  let changed = false;
+
+  if (hashParams.has(savedRouteParam)) {
+    hashParams.delete(savedRouteParam);
+    changed = true;
+  }
+
+  if (url.searchParams.has(savedRouteParam)) {
+    url.searchParams.delete(savedRouteParam);
+    changed = true;
+  }
+
+  if (!changed) return;
+
+  const nextHash = hashParams.toString();
+  const nextUrl = `${url.pathname}${url.search}${nextHash ? `#${nextHash}` : ''}`;
+
+  if (replace) {
+    window.history.replaceState(null, '', nextUrl);
+  } else {
+    window.history.pushState(null, '', nextUrl);
+  }
+}
+
+function getTripShareSourceFromUrl(): TripShareSource | null {
+  const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  const hashShare = hashParams.get(shortTripShareParam);
+  if (hashShare) return { kind: 'server', id: hashShare };
+
+  const pathShare = window.location.pathname.startsWith(sharePathPrefix)
+    ? decodeURIComponent(window.location.pathname.slice(sharePathPrefix.length).split('/')[0] || '')
+    : '';
+  if (pathShare) return { kind: 'server', id: pathShare };
+
+  const searchParams = new URLSearchParams(window.location.search);
+  const queryShare = searchParams.get(shortTripShareParam);
+  if (queryShare) return { kind: 'server', id: queryShare };
+
+  const compactPayload = hashParams.get(compactTripShareParam) || searchParams.get(compactTripShareParam);
+  if (compactPayload) return { kind: 'payload', payload: compactPayload };
+
+  const legacyPayload = hashParams.get(legacyTripShareParam) || searchParams.get(legacyTripShareParam);
+  return legacyPayload ? { kind: 'payload', payload: legacyPayload } : null;
 }
 
 function clearTripSharePayloadFromUrl() {
@@ -952,13 +1181,20 @@ function clearTripSharePayloadFromUrl() {
   const hashParams = new URLSearchParams(url.hash.replace(/^#/, ''));
   let changed = false;
 
-  if (hashParams.has(tripShareParam)) {
-    hashParams.delete(tripShareParam);
-    changed = true;
-  }
+  [savedRouteParam, shortTripShareParam, compactTripShareParam, legacyTripShareParam].forEach((param) => {
+    if (hashParams.has(param)) {
+      hashParams.delete(param);
+      changed = true;
+    }
 
-  if (url.searchParams.has(tripShareParam)) {
-    url.searchParams.delete(tripShareParam);
+    if (url.searchParams.has(param)) {
+      url.searchParams.delete(param);
+      changed = true;
+    }
+  });
+
+  if (url.pathname.startsWith(sharePathPrefix)) {
+    url.pathname = '/';
     changed = true;
   }
 
@@ -969,12 +1205,34 @@ function clearTripSharePayloadFromUrl() {
   window.history.replaceState(null, '', nextUrl);
 }
 
-function parseTripShareFromUrl(workspaceId = defaultWorkspaceId) {
-  const payload = getTripSharePayloadFromUrl();
-  if (!payload) return null;
+function parseEncodedTripSharePayload(payload: string, workspaceId = defaultWorkspaceId) {
+  const decoded = JSON.parse(decodeBase64Url(payload));
+  const importedTrip = parseCompactSharedTrip(decoded, workspaceId) || parseTripImport(decoded, workspaceId);
+  if (!importedTrip) return null;
+
+  const now = new Date().toISOString();
+  return normalizeTrip(
+    {
+      ...importedTrip,
+      id: makeId('trip'),
+      workspaceId,
+      documents: [],
+      createdAt: now,
+      updatedAt: now,
+    },
+    workspaceId,
+  );
+}
+
+async function loadTripShareFromUrl(workspaceId = defaultWorkspaceId) {
+  const source = getTripShareSourceFromUrl();
+  if (!source) return null;
 
   try {
-    const importedTrip = parseTripImport(JSON.parse(decodeBase64Url(payload)), workspaceId);
+    const importedTrip =
+      source.kind === 'server'
+        ? await fetchServerTripShare(source.id, workspaceId)
+        : parseEncodedTripSharePayload(source.payload, workspaceId);
     if (!importedTrip) return null;
 
     const now = new Date().toISOString();
@@ -2078,6 +2336,7 @@ function App() {
   const [showImportModal, setShowImportModal] = useState(false);
   const [saveBackend, setSaveBackend] = useState<SaveBackend>('checking');
   const [isSaving, setIsSaving] = useState(false);
+  const [isSharing, setIsSharing] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
   const [showExportFormatHelp, setShowExportFormatHelp] = useState(false);
   const [drivingMiles, setDrivingMiles] = useState<number | null>(null);
@@ -2283,29 +2542,38 @@ function App() {
   useEffect(() => {
     if (shareImportHandledRef.current) return;
 
-    const hasSharePayload = Boolean(getTripSharePayloadFromUrl());
-    if (!hasSharePayload) {
+    const hasShareSource = Boolean(getTripShareSourceFromUrl());
+    if (!hasShareSource) {
       shareImportHandledRef.current = true;
       return;
     }
 
     shareImportHandledRef.current = true;
-    const sharedTrip = parseTripShareFromUrl(activeWorkspaceId);
-    clearTripSharePayloadFromUrl();
+    let cancelled = false;
 
-    if (!sharedTrip) {
-      setSaveMessage('Share link could not be loaded');
-      return;
-    }
+    loadTripShareFromUrl(activeWorkspaceId).then((sharedTrip) => {
+      if (cancelled) return;
 
-    setDrivingMiles(null);
-    setRoadDriveEstimates(null);
-    setActiveTrip(sharedTrip);
-    setSelectedStopId(sharedTrip.stops[0]?.id || null);
-    setSelectedDocumentId(null);
-    setCurrentView('editor');
-    setSaveMessage(`Shared route loaded: ${sharedTrip.name}. Save it when ready.`);
-    setFitSignal((value) => value + 1);
+      clearTripSharePayloadFromUrl();
+
+      if (!sharedTrip) {
+        setSaveMessage('Share link could not be loaded');
+        return;
+      }
+
+      setDrivingMiles(null);
+      setRoadDriveEstimates(null);
+      setActiveTrip(sharedTrip);
+      setSelectedStopId(sharedTrip.stops[0]?.id || null);
+      setSelectedDocumentId(null);
+      setCurrentView('editor');
+      setSaveMessage(`Shared route loaded: ${sharedTrip.name}. Save it when ready.`);
+      setFitSignal((value) => value + 1);
+    });
+
+    return () => {
+      cancelled = true;
+    };
   }, [activeWorkspaceId]);
 
   const touchTrip = (updater: (trip: Trip) => Trip) => {
@@ -2607,11 +2875,20 @@ function App() {
   const copyTripShareLink = async (trip: Trip) => {
     const normalizedTrip = normalizeTrip(trip, trip.workspaceId || activeWorkspaceId) || trip;
 
+    setIsSharing(true);
     try {
-      await copyText(createTripShareUrl(normalizedTrip));
-      setSaveMessage(`Share link copied: ${normalizedTrip.name}`);
+      const shareId = await createServerTripShare(normalizedTrip);
+      await copyText(createShortTripShareUrl(shareId));
+      setSaveMessage(`Short share link copied: ${normalizedTrip.name}`);
     } catch {
-      setSaveMessage('Share link copy failed');
+      try {
+        await copyText(createEncodedTripShareUrl(normalizedTrip));
+        setSaveMessage(`Share link copied: ${normalizedTrip.name}`);
+      } catch {
+        setSaveMessage('Share link copy failed');
+      }
+    } finally {
+      setIsSharing(false);
     }
   };
 
@@ -2637,6 +2914,7 @@ function App() {
       setSelectedDocumentId(importedTrip.documents[0]?.id || null);
       setSavedTrips(nextSavedTrips);
       setCurrentView('editor');
+      clearSavedRouteUrl(true);
       setFitSignal((value) => value + 1);
       if (closeModal) {
         setShowImportModal(false);
@@ -2714,6 +2992,7 @@ function App() {
       setSelectedStopId(proposedTrip.stops[0]?.id || null);
       setSelectedDocumentId(proposedTrip.documents[0]?.id || null);
       setCurrentView('editor');
+      clearSavedRouteUrl(true);
       setFitSignal((value) => value + 1);
       setRouteAssistantPrompt('');
       setRouteAssistantMessage(`${result.summary} Save the draft when ready.`);
@@ -2740,6 +3019,7 @@ function App() {
 
     setActiveTrip(tripToSave);
     setSavedTrips(nextSavedTrips);
+    setSavedRouteUrl(tripToSave.id, true);
     setIsSaving(true);
 
     try {
@@ -2772,12 +3052,14 @@ function App() {
     setSelectedDocumentId(null);
     setCurrentView('editor');
     setSaveMessage('');
+    clearSavedRouteUrl();
     setFitSignal((value) => value + 1);
   };
 
-  const loadTrip = (trip: Trip) => {
+  const loadTrip = (trip: Trip, options: { syncUrl?: boolean } = {}) => {
     const nextTrip = normalizeTrip(trip, activeWorkspaceId);
     if (!nextTrip) return;
+    const syncUrl = options.syncUrl !== false;
 
     setDrivingMiles(null);
     setRoadDriveEstimates(null);
@@ -2786,12 +3068,48 @@ function App() {
     setSelectedDocumentId(nextTrip.documents[0]?.id || null);
     setCurrentView('editor');
     setSaveMessage(`Loaded ${nextTrip.name}`);
+    if (syncUrl) {
+      setSavedRouteUrl(nextTrip.id);
+    }
     setFitSignal((value) => value + 1);
   };
+
+  useEffect(() => {
+    const loadSavedRouteFromUrl = () => {
+      if (getTripShareSourceFromUrl()) return;
+
+      const routeId = getSavedRouteIdFromUrl();
+      if (!routeId) return;
+
+      const savedRoute = savedTrips.find((trip) => trip.id === routeId);
+      if (savedRoute) {
+        if (activeTrip.id !== savedRoute.id || currentView !== 'editor') {
+          loadTrip(savedRoute, { syncUrl: false });
+        }
+        return;
+      }
+
+      if (saveBackend !== 'checking') {
+        setSaveMessage('Saved route URL was not found in this workspace');
+      }
+    };
+
+    loadSavedRouteFromUrl();
+    window.addEventListener('hashchange', loadSavedRouteFromUrl);
+    window.addEventListener('popstate', loadSavedRouteFromUrl);
+
+    return () => {
+      window.removeEventListener('hashchange', loadSavedRouteFromUrl);
+      window.removeEventListener('popstate', loadSavedRouteFromUrl);
+    };
+  }, [activeTrip.id, currentView, saveBackend, savedTrips]);
 
   const removeSavedTrip = async (tripId: string) => {
     const nextSavedTrips = savedTrips.filter((trip) => trip.id !== tripId);
     setSavedTrips(nextSavedTrips);
+    if (getSavedRouteIdFromUrl() === tripId) {
+      clearSavedRouteUrl(true);
+    }
 
     if (saveBackend !== 'database') {
       writeWorkspaceSavedTrips(activeWorkspaceId, nextSavedTrips);
@@ -2824,6 +3142,7 @@ function App() {
     setRouteAssistantMessage('');
     setSaveMessage('');
     setSaveBackend('checking');
+    clearSavedRouteUrl(true);
     setFitSignal((value) => value + 1);
   };
 
@@ -2856,6 +3175,7 @@ function App() {
     setRouteAssistantMessage('');
     setSaveMessage(`Workspace created: ${workspace.name}`);
     setSaveBackend('checking');
+    clearSavedRouteUrl(true);
     setFitSignal((value) => value + 1);
   };
 
@@ -2998,8 +3318,9 @@ function App() {
                 type="button"
                 className="icon-button"
                 onClick={() => copyTripShareLink(getActiveTripForExport())}
-                title="Copy route share link"
+                title={isSharing ? 'Creating share link' : 'Copy route share link'}
                 aria-label="Copy route share link"
+                disabled={isSharing}
               >
                 <Share2 size={18} />
               </button>
@@ -3029,11 +3350,13 @@ function App() {
           </span>
           <form className="route-assistant-form" onSubmit={applyRouteAssistant}>
             <label htmlFor="route-assistant-prompt">AI route edit</label>
-            <input
+            <textarea
               id="route-assistant-prompt"
               value={routeAssistantPrompt}
               onChange={(event) => setRouteAssistantPrompt(event.currentTarget.value)}
               placeholder="Add Denver by car, or mark a long leg as plane/boat; start/end stay locked"
+              rows={3}
+              maxLength={routeAssistantPromptMaxLength}
             />
             <button
               type="submit"
@@ -3691,8 +4014,9 @@ function App() {
                           type="button"
                           className="icon-button ghost"
                           onClick={() => copyTripShareLink(trip)}
-                          title="Copy route share link"
+                          title={isSharing ? 'Creating share link' : 'Copy route share link'}
                           aria-label={`Copy ${trip.name} share link`}
+                          disabled={isSharing}
                         >
                           <Share2 size={16} />
                         </button>

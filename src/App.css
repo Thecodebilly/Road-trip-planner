@@ -66,13 +66,24 @@ button {
 .route-assistant-form {
   min-width: 0;
   display: grid;
-  grid-template-columns: auto minmax(240px, 1fr) auto;
-  align-items: center;
+  grid-template-columns: auto minmax(280px, 1fr) auto;
+  align-items: start;
   gap: 0.55rem;
 }
 
 .route-assistant-form label {
+  padding-top: 0.65rem;
   white-space: nowrap;
+}
+
+.route-assistant-form textarea {
+  min-height: 76px;
+  max-height: 220px;
+  resize: vertical;
+}
+
+.route-assistant-form .primary-button {
+  align-self: start;
 }
 
 .route-assistant-message {
@@ -1658,6 +1669,10 @@ code {
 
   .route-assistant-form {
     grid-template-columns: 1fr;
+  }
+
+  .route-assistant-form label {
+    padding-top: 0;
   }
 
   .route-assistant-message {
