@@ -1,6 +1,5 @@
 import 'dotenv/config';
 
-import { randomBytes } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import http from 'node:http';
@@ -294,21 +293,45 @@ function normalizeSharedTripExport(value) {
   };
 }
 
-function isShareId(value) {
+function createShareSlug(value) {
+  const slug = String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 96)
+    .replace(/-+$/g, '');
+
+  return slug || 'road-trip';
+}
+
+function isShareSlug(value) {
+  return typeof value === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value);
+}
+
+function isLegacyShareId(value) {
   return typeof value === 'string' && /^[a-f0-9]{10,20}$/i.test(value);
 }
 
-function extractShareId(value) {
-  if (typeof value !== 'string') return '';
+function getShareSlugCandidates(value) {
+  if (typeof value !== 'string') return [];
 
-  const trimmed = value.trim();
-  if (isShareId(trimmed)) return trimmed.toLowerCase();
+  const slug = createShareSlug(value);
+  const candidates = isShareSlug(slug) ? [slug] : [];
+  const legacyId = value.trim().match(/(?:^|[-_])([a-f0-9]{10,20})$/i)?.[1]?.toLowerCase() || '';
 
-  return trimmed.match(/(?:^|[-_])([a-f0-9]{10,20})$/i)?.[1]?.toLowerCase() || '';
+  if (legacyId && !candidates.includes(legacyId)) {
+    candidates.push(legacyId);
+  }
+
+  return candidates;
 }
 
-function createShareId() {
-  return randomBytes(5).toString('hex');
+function createDuplicateShareSlugError(id) {
+  const error = new Error('SHARED_TRIP_NAME_EXISTS');
+  error.code = 'SHARED_TRIP_NAME_EXISTS';
+  error.id = id;
+  return error;
 }
 
 async function canUseDatabase() {
@@ -332,8 +355,8 @@ async function loadFileSharedTrips() {
       const id = Array.isArray(record) ? record[0] : record?.id;
       const exportedTrip = Array.isArray(record) ? record[1] : record?.export;
       const normalizedExport = normalizeSharedTripExport(exportedTrip);
-      if (isShareId(id) && normalizedExport) {
-        fileSharedTrips.set(id, normalizedExport);
+      if ((isShareSlug(id) || isLegacyShareId(id)) && normalizedExport) {
+        fileSharedTrips.set(id.toLowerCase(), normalizedExport);
       }
     });
   } catch (error) {
@@ -362,39 +385,41 @@ function queueFileSharedTripsSave() {
   return fileSharedTripsWriteQueue;
 }
 
-async function fileShareIdExists(id) {
+async function fileShareSlugExists(id) {
   await loadFileSharedTrips();
   return fileSharedTrips.has(id);
 }
 
-async function databaseShareIdExists(id) {
+async function databaseShareSlugExists(id) {
   const result = await pool.query('SELECT 1 FROM shared_trips WHERE id = $1', [id]);
   return Boolean(result.rowCount);
 }
 
-async function createUniqueShareId(useDatabase) {
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const id = createShareId();
-    const exists = useDatabase ? await databaseShareIdExists(id) : await fileShareIdExists(id);
-
-    if (!exists) return id;
-  }
-
-  throw new Error('SHARE_ID_COLLISION');
-}
-
 async function saveSharedTripExport(exportedTrip) {
   const useDatabase = await canUseDatabase();
-  const id = await createUniqueShareId(useDatabase);
+  const id = createShareSlug(exportedTrip.trip?.name);
+  const exists = useDatabase ? await databaseShareSlugExists(id) : await fileShareSlugExists(id);
+
+  if (exists) {
+    throw createDuplicateShareSlugError(id);
+  }
 
   if (useDatabase) {
-    await pool.query(
-      `
-        INSERT INTO shared_trips (id, export)
-        VALUES ($1, $2::jsonb)
-      `,
-      [id, JSON.stringify(exportedTrip)],
-    );
+    try {
+      await pool.query(
+        `
+          INSERT INTO shared_trips (id, export)
+          VALUES ($1, $2::jsonb)
+        `,
+        [id, JSON.stringify(exportedTrip)],
+      );
+    } catch (error) {
+      if (error?.code === '23505') {
+        throw createDuplicateShareSlugError(id);
+      }
+
+      throw error;
+    }
 
     return { id, durable: true };
   }
@@ -412,16 +437,20 @@ async function saveSharedTripExport(exportedTrip) {
 }
 
 async function readSharedTripExport(id) {
-  const shareId = extractShareId(id);
-  if (!shareId) return null;
+  const shareIds = getShareSlugCandidates(id);
+  if (!shareIds.length) return null;
 
   if (await canUseDatabase()) {
-    const result = await pool.query('SELECT export FROM shared_trips WHERE id = $1', [shareId]);
+    const result = await pool.query(
+      'SELECT export FROM shared_trips WHERE id = ANY($1::text[]) ORDER BY array_position($1::text[], id) LIMIT 1',
+      [shareIds],
+    );
     return normalizeSharedTripExport(result.rows[0]?.export);
   }
 
   await loadFileSharedTrips();
-  return normalizeSharedTripExport(fileSharedTrips.get(shareId));
+  const matchedId = shareIds.find((shareId) => fileSharedTrips.has(shareId));
+  return normalizeSharedTripExport(matchedId ? fileSharedTrips.get(matchedId) : null);
 }
 
 function isDateOnly(value) {
@@ -1040,14 +1069,23 @@ async function handleApi(request, response, url) {
       return;
     }
 
-    const result = await saveSharedTripExport(exportedTrip);
-    sendJson(response, 201, result);
+    try {
+      const result = await saveSharedTripExport(exportedTrip);
+      sendJson(response, 201, result);
+    } catch (error) {
+      if (error?.code === 'SHARED_TRIP_NAME_EXISTS') {
+        sendJson(response, 409, { error: 'SHARED_TRIP_NAME_EXISTS', slug: error.id });
+        return;
+      }
+
+      throw error;
+    }
     return;
   }
 
   const sharedTripMatch = url.pathname.match(/^\/api\/shared-trips\/([^/]+)$/);
   if (sharedTripMatch && request.method === 'GET') {
-    const shareId = decodeURIComponent(sharedTripMatch[1]);
+    const shareId = safeDecodeValue(sharedTripMatch[1]);
     const exportedTrip = await readSharedTripExport(shareId);
 
     if (!exportedTrip) {
@@ -1129,6 +1167,14 @@ function safeDecodePathname(pathname) {
     return decodeURIComponent(pathname);
   } catch {
     return '/';
+  }
+}
+
+function safeDecodeValue(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return '';
   }
 }
 

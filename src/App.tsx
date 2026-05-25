@@ -1099,10 +1099,7 @@ function savedRouteTokenMatchesId(token: string, tripId: string) {
 }
 
 function extractShareIdFromToken(token: string) {
-  const value = token.trim();
-  if (/^[a-f0-9]{10,20}$/i.test(value)) return value;
-
-  return value.match(/(?:^|[-_])([a-f0-9]{10,20})$/i)?.[1] || value;
+  return token.trim();
 }
 
 function safeDecodeUrlPart(value: string) {
@@ -1113,10 +1110,8 @@ function safeDecodeUrlPart(value: string) {
   }
 }
 
-function createShortTripShareUrl(shareId: string, tripName: string) {
-  const namedToken = createNamedUrlToken(tripName, shareId);
-
-  return new URL(`${sharePathPrefix}${encodeURIComponent(namedToken)}`, window.location.origin).toString();
+function createShortTripShareUrl(shareId: string) {
+  return new URL(`${sharePathPrefix}${encodeURIComponent(shareId)}`, window.location.origin).toString();
 }
 
 async function createServerTripShare(trip: Trip) {
@@ -1130,6 +1125,18 @@ async function createServerTripShare(trip: Trip) {
   });
 
   if (!response.ok) {
+    if (response.status === 409) {
+      let slug = '';
+      try {
+        const payload = await response.json();
+        slug = typeof payload.slug === 'string' ? payload.slug : '';
+      } catch {
+        slug = '';
+      }
+
+      throw new Error(`CREATE_SHARED_TRIP_DUPLICATE_${slug || sanitizeFileName(trip.name)}`);
+    }
+
     throw new Error(`CREATE_SHARED_TRIP_${response.status}`);
   }
 
@@ -3034,13 +3041,13 @@ function App() {
     setIsSharing(true);
     try {
       const shareId = await createServerTripShare(normalizedTrip);
-      await copyText(createShortTripShareUrl(shareId, normalizedTrip.name));
+      await copyText(createShortTripShareUrl(shareId));
       setSaveMessage(`Short share link copied: ${normalizedTrip.name}`);
-    } catch {
-      try {
-        await copyText(createEncodedTripShareUrl(normalizedTrip));
-        setSaveMessage(`Share link copied: ${normalizedTrip.name}`);
-      } catch {
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith('CREATE_SHARED_TRIP_DUPLICATE_')) {
+        const slug = error.message.replace('CREATE_SHARED_TRIP_DUPLICATE_', '');
+        setSaveMessage(`Share URL /share/${slug} already exists. Rename this trip to share it.`);
+      } else {
         setSaveMessage('Share link copy failed');
       }
     } finally {
