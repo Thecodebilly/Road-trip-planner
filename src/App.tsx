@@ -15,6 +15,7 @@ import {
   Car,
   ChevronDown,
   ChevronUp,
+  CircleHelp,
   Copy,
   Download,
   Eye,
@@ -30,6 +31,7 @@ import {
   Plus,
   Route,
   Save,
+  Share2,
   Ship,
   Sparkles,
   Trash2,
@@ -105,7 +107,7 @@ type HotelCandidate = {
 type CachedRouteLeg = DriveEstimate;
 
 type CachedRoute = {
-  version: 1;
+  version: 2;
   routePaths: google.maps.LatLngLiteral[][];
   distanceMiles: number | null;
   routeLegs: CachedRouteLeg[];
@@ -164,6 +166,10 @@ type RouteAssistantResult = {
   trip: Trip;
 };
 
+type RouteAssistantSettings = {
+  maxCarLegHours: number;
+};
+
 type RoadRoute = {
   distanceMeters?: number;
   durationMillis?: number;
@@ -215,11 +221,13 @@ const workspacesKey = 'road-trip-planner.workspaces.v1';
 const activeWorkspaceKey = 'road-trip-planner.activeWorkspace.v1';
 const gasPriceKey = 'road-trip-planner.gasPrice.v1';
 const fuelMpgKey = 'road-trip-planner.fuelMpg.v1';
+const maxCarLegHoursKey = 'road-trip-planner.maxCarLegHours.v1';
 const routeCacheKey = 'road-trip-planner.routeCache.v1';
 const hotelCacheKey = 'road-trip-planner.hotelCache.v1';
 const defaultWorkspaceId = 'workspace-default';
 const defaultTripId = 'default-2026-usa-itinerary';
 const tripExportFormat = 'road-trip-planner.saved-trip.v1';
+const tripShareParam = 'trip';
 const maxStopsPerDirectionsRequest = 25;
 const maxHotelSearchPoints = 8;
 const maxHotelCandidates = 12;
@@ -231,6 +239,7 @@ const maxHotelCacheEntries = 80;
 const maxDocumentFileBytes = 1024 * 1024;
 const defaultGasPrice = 3.5;
 const defaultFuelMpg = 25;
+const defaultMaxCarLegHours = 14;
 const estimatedAverageMph = 55;
 const sleepingArrangementOptions: SleepingArrangement[] = ['camping', 'hotel', 'friend'];
 const travelModeOptions: TravelMode[] = ['car', 'plane', 'boat'];
@@ -687,6 +696,11 @@ function readNumberStorage(key: string, fallback: number, minimum = 0) {
   }
 }
 
+function clampMaxCarLegHours(value: number) {
+  if (!Number.isFinite(value)) return defaultMaxCarLegHours;
+  return Math.min(24, Math.max(1, value));
+}
+
 function removeStorage(key: string) {
   try {
     window.localStorage.removeItem(key);
@@ -808,14 +822,18 @@ async function deleteTripFromDatabase(tripId: string) {
   }
 }
 
-async function requestRouteAssistant(trip: Trip, instruction: string): Promise<RouteAssistantResult> {
+async function requestRouteAssistant(
+  trip: Trip,
+  instruction: string,
+  settings: RouteAssistantSettings,
+): Promise<RouteAssistantResult> {
   const response = await fetch('/api/route-assistant', {
     method: 'POST',
     headers: {
       accept: 'application/json',
       'content-type': 'application/json',
     },
-    body: JSON.stringify({ trip, instruction }),
+    body: JSON.stringify({ trip, instruction, settings }),
   });
 
   if (!response.ok) {
@@ -840,6 +858,45 @@ function createTripExport(trip: Trip): ExportedTrip {
     exportedAt: new Date().toISOString(),
     trip: normalizeTrip(trip, trip.workspaceId) || trip,
   };
+}
+
+function createSharedTripExport(trip: Trip): ExportedTrip {
+  const normalizedTrip = normalizeTrip(
+    {
+      ...trip,
+      documents: [],
+    },
+    trip.workspaceId,
+  ) || {
+    ...trip,
+    documents: [],
+  };
+
+  return {
+    format: tripExportFormat,
+    exportedAt: new Date().toISOString(),
+    trip: normalizedTrip,
+  };
+}
+
+function encodeBase64Url(value: string) {
+  const bytes = new TextEncoder().encode(value);
+  let binary = '';
+
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+}
+
+function decodeBase64Url(value: string) {
+  const base64 = value.replace(/-/g, '+').replace(/_/g, '/');
+  const paddedBase64 = base64.padEnd(Math.ceil(base64.length / 4) * 4, '=');
+  const binary = atob(paddedBase64);
+  const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+
+  return new TextDecoder().decode(bytes);
 }
 
 function parseTripImport(candidate: unknown, workspaceId = defaultWorkspaceId) {
@@ -869,6 +926,72 @@ function parseTripImport(candidate: unknown, workspaceId = defaultWorkspaceId) {
     },
     workspaceId,
   );
+}
+
+function createTripShareUrl(trip: Trip) {
+  const url = new URL(window.location.href);
+  const hashParams = new URLSearchParams();
+
+  url.searchParams.delete(tripShareParam);
+  hashParams.set(tripShareParam, encodeBase64Url(JSON.stringify(createSharedTripExport(trip))));
+  url.hash = hashParams.toString();
+
+  return url.toString();
+}
+
+function getTripSharePayloadFromUrl() {
+  const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+  const hashTrip = hashParams.get(tripShareParam);
+  if (hashTrip) return hashTrip;
+
+  return new URLSearchParams(window.location.search).get(tripShareParam);
+}
+
+function clearTripSharePayloadFromUrl() {
+  const url = new URL(window.location.href);
+  const hashParams = new URLSearchParams(url.hash.replace(/^#/, ''));
+  let changed = false;
+
+  if (hashParams.has(tripShareParam)) {
+    hashParams.delete(tripShareParam);
+    changed = true;
+  }
+
+  if (url.searchParams.has(tripShareParam)) {
+    url.searchParams.delete(tripShareParam);
+    changed = true;
+  }
+
+  if (!changed) return;
+
+  const nextHash = hashParams.toString();
+  const nextUrl = `${url.pathname}${url.search}${nextHash ? `#${nextHash}` : ''}`;
+  window.history.replaceState(null, '', nextUrl);
+}
+
+function parseTripShareFromUrl(workspaceId = defaultWorkspaceId) {
+  const payload = getTripSharePayloadFromUrl();
+  if (!payload) return null;
+
+  try {
+    const importedTrip = parseTripImport(JSON.parse(decodeBase64Url(payload)), workspaceId);
+    if (!importedTrip) return null;
+
+    const now = new Date().toISOString();
+    return normalizeTrip(
+      {
+        ...importedTrip,
+        id: makeId('trip'),
+        workspaceId,
+        documents: [],
+        createdAt: now,
+        updatedAt: now,
+      },
+      workspaceId,
+    );
+  } catch {
+    return null;
+  }
 }
 
 function sanitizeFileName(value: string) {
@@ -1121,6 +1244,10 @@ function calculateSegmentMiles(previous: TripStop, next: TripStop) {
   return calculatePointMiles(previous, next);
 }
 
+function estimateRoadMiles(previous: google.maps.LatLngLiteral, next: google.maps.LatLngLiteral) {
+  return calculatePointMiles(previous, next) * 1.2;
+}
+
 function findClosestStopIndex(position: google.maps.LatLngLiteral, stops: TripStop[]) {
   if (!stops.length) return -1;
 
@@ -1213,7 +1340,7 @@ function buildEstimatedDriveEstimates(stops: TripStop[]): DriveEstimate[] {
     const next = stops[index];
     if (next.travelMode !== 'car') continue;
 
-    const distanceMiles = calculateSegmentMiles(previous, next);
+    const distanceMiles = estimateRoadMiles(previous, next);
 
     estimates.push({
       fromStopId: previous.id,
@@ -1264,6 +1391,61 @@ function countNonCarTravelLegs(stops: TripStop[]) {
   return stops.filter((stop, index) => index > 0 && stop.travelMode !== 'car').length;
 }
 
+function getCarLegDayEstimate(
+  stop: TripStop,
+  stopIndex: number,
+  stops: TripStop[],
+  driveEstimate: DriveEstimate | undefined,
+  maxCarLegHours: number,
+) {
+  if (stopIndex <= 0 || stop.travelMode !== 'car') return null;
+
+  const previous = stops[stopIndex - 1];
+  if (!previous) return null;
+
+  const distanceMiles = driveEstimate?.distanceMiles ?? estimateRoadMiles(previous, stop);
+  const durationMinutes = driveEstimate?.durationMinutes ?? estimateDriveMinutes(distanceMiles);
+  const maxCarLegMinutes = Math.round(clampMaxCarLegHours(maxCarLegHours) * 60);
+
+  return {
+    distanceMiles,
+    durationMinutes,
+    isTraversableInDay: durationMinutes <= maxCarLegMinutes,
+  };
+}
+
+function getCarLegDayWarning(
+  stop: TripStop,
+  stopIndex: number,
+  stops: TripStop[],
+  driveEstimate: DriveEstimate | undefined,
+  maxCarLegHours: number,
+) {
+  const estimate = getCarLegDayEstimate(stop, stopIndex, stops, driveEstimate, maxCarLegHours);
+  if (!estimate || estimate.isTraversableInDay) return '';
+
+  return `Long car day: ${Math.round(estimate.distanceMiles).toLocaleString()} mi / ${formatDriveDuration(
+    estimate.durationMinutes,
+  )}. Max is ${clampMaxCarLegHours(maxCarLegHours)}h; add an overnight stop or switch this leg to plane/boat.`;
+}
+
+function countOverlongCarLegs(
+  stops: TripStop[],
+  driveEstimateByStopId: Map<string, DriveEstimate>,
+  maxCarLegHours: number,
+) {
+  return stops.filter((stop, index) => {
+    const estimate = getCarLegDayEstimate(
+      stop,
+      index,
+      stops,
+      driveEstimateByStopId.get(stop.id),
+      maxCarLegHours,
+    );
+    return Boolean(estimate && !estimate.isTraversableInDay);
+  }).length;
+}
+
 function formatTravelLegSummary(
   stop: TripStop,
   stopIndex: number,
@@ -1278,7 +1460,7 @@ function formatTravelLegSummary(
     if (driveEstimate) return formatDriveSummary(driveEstimate, gasPrice, fuelMpg);
 
     const previous = stops[stopIndex - 1];
-    const distanceMiles = previous ? calculateSegmentMiles(previous, stop) : 0;
+    const distanceMiles = previous ? estimateRoadMiles(previous, stop) : 0;
     return formatDriveSummary(
       {
         fromStopId: previous?.id || '',
@@ -1361,7 +1543,7 @@ function isPosition(value: unknown): value is google.maps.LatLngLiteral {
 
 function readCachedRoute(key: string, stops: TripStop[]) {
   const cachedRoute = getCachedValue<CachedRoute>(routeCacheKey, key, routeCacheTtlMs);
-  if (!cachedRoute || cachedRoute.version !== 1) return null;
+  if (!cachedRoute || cachedRoute.version !== 2) return null;
   if (!Array.isArray(cachedRoute.routePaths) || !Array.isArray(cachedRoute.routeLegs)) return null;
   if (cachedRoute.routeLegs.length !== getCarLegCount(stops)) return null;
 
@@ -1370,11 +1552,13 @@ function readCachedRoute(key: string, stops: TripStop[]) {
     .filter((routePath) => routePath.length > 1);
 
   if (!routePaths.length) return null;
+  const driveEstimates = buildCachedDriveEstimates(cachedRoute.routeLegs, stops);
+  if (driveEstimates.length !== getCarLegCount(stops)) return null;
 
   return {
     routePaths,
     distanceMiles: Number.isFinite(cachedRoute.distanceMiles) ? cachedRoute.distanceMiles : null,
-    driveEstimates: buildCachedDriveEstimates(cachedRoute.routeLegs, stops),
+    driveEstimates,
     hotelSearchPoints: Array.isArray(cachedRoute.hotelSearchPoints)
       ? cachedRoute.hotelSearchPoints.filter((point) => point && typeof point.id === 'string' && isPosition(point.position))
       : buildRouteHotelSearchPoints(routePaths, stops),
@@ -1392,7 +1576,7 @@ function writeCachedRoute(
     routeCacheKey,
     key,
     {
-      version: 1,
+      version: 2,
       routePaths,
       distanceMiles,
       routeLegs: cacheRouteLegs(driveEstimates),
@@ -1865,6 +2049,7 @@ function App() {
   const importInputRef = useRef<HTMLInputElement | null>(null);
   const documentInputRef = useRef<HTMLInputElement | null>(null);
   const documentUploadStopIdRef = useRef('');
+  const shareImportHandledRef = useRef(false);
   const initialWorkspaceSnapshotRef = useRef<ReturnType<typeof getInitialWorkspaceSnapshot> | null>(null);
   if (!initialWorkspaceSnapshotRef.current) {
     initialWorkspaceSnapshotRef.current = getInitialWorkspaceSnapshot();
@@ -1894,11 +2079,15 @@ function App() {
   const [saveBackend, setSaveBackend] = useState<SaveBackend>('checking');
   const [isSaving, setIsSaving] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  const [showExportFormatHelp, setShowExportFormatHelp] = useState(false);
   const [drivingMiles, setDrivingMiles] = useState<number | null>(null);
   const [roadDriveEstimates, setRoadDriveEstimates] = useState<DriveEstimate[] | null>(null);
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
   const [gasPrice, setGasPrice] = useState(() => readNumberStorage(gasPriceKey, defaultGasPrice));
   const [fuelMpg, setFuelMpg] = useState(() => readNumberStorage(fuelMpgKey, defaultFuelMpg, 0.01));
+  const [maxCarLegHours, setMaxCarLegHours] = useState(() =>
+    clampMaxCarLegHours(readNumberStorage(maxCarLegHoursKey, defaultMaxCarLegHours, 1)),
+  );
   const [previewExport, setPreviewExport] = useState<ExportedTrip | null>(null);
   const [previewCopied, setPreviewCopied] = useState(false);
 
@@ -1936,6 +2125,10 @@ function App() {
   const displayTripTotal = formatCurrency(gasCost + lodgingCost + nonCarTravelCost);
   const remoteStops = useMemo(() => stops.filter((stop) => stop.remoteWork).length, [stops]);
   const nonCarTravelLegs = useMemo(() => countNonCarTravelLegs(stops), [stops]);
+  const overlongCarLegs = useMemo(
+    () => countOverlongCarLegs(stops, driveEstimateByStopId, maxCarLegHours),
+    [driveEstimateByStopId, maxCarLegHours, stops],
+  );
   const documents = activeTrip.documents;
   const selectedDocument = useMemo(
     () => documents.find((document) => document.id === selectedDocumentId) || null,
@@ -1957,6 +2150,17 @@ function App() {
       fuelMpg,
     );
   }, [driveEstimateByStopId, fuelMpg, gasPrice, selectedStop, selectedStopIndex, stops]);
+  const selectedStopCarDayWarning = useMemo(() => {
+    if (!selectedStop || selectedStopIndex < 0) return '';
+
+    return getCarLegDayWarning(
+      selectedStop,
+      selectedStopIndex,
+      stops,
+      driveEstimateByStopId.get(selectedStop.id),
+      maxCarLegHours,
+    );
+  }, [driveEstimateByStopId, maxCarLegHours, selectedStop, selectedStopIndex, stops]);
   const dateRange = useMemo(() => formatStopDateRange(stops), [stops]);
   const saveBackendLabel =
     saveBackend === 'database' ? 'DB' : saveBackend === 'local' ? 'Local' : 'Sync';
@@ -2026,6 +2230,10 @@ function App() {
   }, [fuelMpg]);
 
   useEffect(() => {
+    writeStorage(maxCarLegHoursKey, maxCarLegHours);
+  }, [maxCarLegHours]);
+
+  useEffect(() => {
     writeWorkspaceActiveTrip(activeWorkspaceId, activeTrip);
   }, [activeTrip, activeWorkspaceId]);
 
@@ -2071,6 +2279,34 @@ function App() {
       setSelectedDocumentId(null);
     }
   }, [documents, selectedDocumentId]);
+
+  useEffect(() => {
+    if (shareImportHandledRef.current) return;
+
+    const hasSharePayload = Boolean(getTripSharePayloadFromUrl());
+    if (!hasSharePayload) {
+      shareImportHandledRef.current = true;
+      return;
+    }
+
+    shareImportHandledRef.current = true;
+    const sharedTrip = parseTripShareFromUrl(activeWorkspaceId);
+    clearTripSharePayloadFromUrl();
+
+    if (!sharedTrip) {
+      setSaveMessage('Share link could not be loaded');
+      return;
+    }
+
+    setDrivingMiles(null);
+    setRoadDriveEstimates(null);
+    setActiveTrip(sharedTrip);
+    setSelectedStopId(sharedTrip.stops[0]?.id || null);
+    setSelectedDocumentId(null);
+    setCurrentView('editor');
+    setSaveMessage(`Shared route loaded: ${sharedTrip.name}. Save it when ready.`);
+    setFitSignal((value) => value + 1);
+  }, [activeWorkspaceId]);
 
   const touchTrip = (updater: (trip: Trip) => Trip) => {
     setDrivingMiles(null);
@@ -2184,6 +2420,13 @@ function App() {
     if (!Number.isFinite(nextValue) || nextValue <= 0) return;
 
     setFuelMpg(nextValue);
+  };
+
+  const updateMaxCarLegHours = (value: string) => {
+    const nextValue = Number(value);
+    if (!Number.isFinite(nextValue)) return;
+
+    setMaxCarLegHours(clampMaxCarLegHours(nextValue));
   };
 
   const insertStopAtCoordinates = (
@@ -2361,6 +2604,17 @@ function App() {
     }
   };
 
+  const copyTripShareLink = async (trip: Trip) => {
+    const normalizedTrip = normalizeTrip(trip, trip.workspaceId || activeWorkspaceId) || trip;
+
+    try {
+      await copyText(createTripShareUrl(normalizedTrip));
+      setSaveMessage(`Share link copied: ${normalizedTrip.name}`);
+    } catch {
+      setSaveMessage('Share link copy failed');
+    }
+  };
+
   const importTripJson = async (jsonText: string, closeModal = false) => {
     setIsImporting(true);
 
@@ -2435,7 +2689,7 @@ function App() {
     setRouteAssistantMessage('Thinking through route changes...');
 
     try {
-      const result = await requestRouteAssistant(getActiveTripForExport(), instruction);
+      const result = await requestRouteAssistant(getActiveTripForExport(), instruction, { maxCarLegHours });
       const now = new Date().toISOString();
       const proposedTrip = normalizeTrip(
         {
@@ -2743,6 +2997,15 @@ function App() {
               <button
                 type="button"
                 className="icon-button"
+                onClick={() => copyTripShareLink(getActiveTripForExport())}
+                title="Copy route share link"
+                aria-label="Copy route share link"
+              >
+                <Share2 size={18} />
+              </button>
+              <button
+                type="button"
+                className="icon-button"
                 onClick={exportActiveTrip}
                 title="Export active trip"
                 aria-label="Export active trip"
@@ -2840,6 +3103,10 @@ function App() {
                 <span>Non-car</span>
               </div>
               <div>
+                <strong>{overlongCarLegs}</strong>
+                <span>Long car days</span>
+              </div>
+              <div>
                 <strong>{documents.length}</strong>
                 <span>Docs</span>
               </div>
@@ -2866,6 +3133,18 @@ function App() {
                   step="1"
                   value={fuelMpg}
                   onChange={(event) => updateFuelMpg(event.currentTarget.value)}
+                />
+              </span>
+              <span>
+                <label htmlFor="max-car-leg-hours">Max drive hrs/day</label>
+                <input
+                  id="max-car-leg-hours"
+                  type="number"
+                  min="1"
+                  max="24"
+                  step="0.5"
+                  value={maxCarLegHours}
+                  onChange={(event) => updateMaxCarLegHours(event.currentTarget.value)}
                 />
               </span>
             </div>
@@ -2942,10 +3221,12 @@ function App() {
                   gasPrice,
                   fuelMpg,
                 );
+                const carDayWarning = getCarLegDayWarning(stop, stopIndex, stops, driveEstimate, maxCarLegHours);
                 const stopIsWeekend = isWeekendDate(stop.date);
                 const stopCardClassName = [
                   'stop-card',
                   getSleepClass(stop.sleepingArrangement),
+                  carDayWarning ? 'long-car-day' : '',
                   stop.remoteWork ? 'remote' : '',
                   stopIsWeekend ? 'weekend' : '',
                   stop.id === selectedStopId ? 'selected' : '',
@@ -2981,6 +3262,12 @@ function App() {
                             {travelSummary}
                           </small>
                         )}
+                        {carDayWarning && (
+                          <small className="drive-warning">
+                            <Route size={14} />
+                            {carDayWarning}
+                          </small>
+                        )}
                         {stop.sleepingArrangement !== 'camping' && (
                           <small className="lodging-summary">
                             <BedDouble size={14} />
@@ -2992,6 +3279,7 @@ function App() {
                             {formatSleepingArrangementLabel(stop.sleepingArrangement)}
                           </span>
                           {travelMode !== 'car' && <span className="stop-tag travel">{getTravelModeLabel(travelMode)}</span>}
+                          {carDayWarning && <span className="stop-tag long-drive">Long car day</span>}
                           {stop.remoteWork && <span className="stop-tag remote">Remote work</span>}
                           {stopIsWeekend && <span className="stop-tag weekend">Weekend</span>}
                         </span>
@@ -3135,6 +3423,7 @@ function App() {
                     ? ' Planning estimate added to the trip total.'
                     : ''}
                 </p>
+                {selectedStopCarDayWarning && <p className="travel-warning">{selectedStopCarDayWarning}</p>}
               </div>
 
               <div className="sleeping-section">
@@ -3341,6 +3630,16 @@ function App() {
               </p>
             </span>
             <div className="saved-page-actions">
+              <button
+                type="button"
+                className={showExportFormatHelp ? 'icon-button active' : 'icon-button'}
+                onClick={() => setShowExportFormatHelp((value) => !value)}
+                title="Export format"
+                aria-label="Export format"
+                aria-expanded={showExportFormatHelp}
+              >
+                <CircleHelp size={18} />
+              </button>
               <button type="button" className="secondary-button" onClick={startNewTrip}>
                 <FilePlus2 size={17} />
                 <span>New trip</span>
@@ -3352,7 +3651,7 @@ function App() {
             </div>
           </section>
 
-          <section className="saved-page-grid">
+          <section className={showExportFormatHelp ? 'saved-page-grid format-open' : 'saved-page-grid'}>
             <div className="saved-library">
               <div className="section-heading">
                 <h2>Library</h2>
@@ -3391,6 +3690,15 @@ function App() {
                         <button
                           type="button"
                           className="icon-button ghost"
+                          onClick={() => copyTripShareLink(trip)}
+                          title="Copy route share link"
+                          aria-label={`Copy ${trip.name} share link`}
+                        >
+                          <Share2 size={16} />
+                        </button>
+                        <button
+                          type="button"
+                          className="icon-button ghost"
                           onClick={() => downloadTripExport(trip)}
                           title="Export saved trip"
                           aria-label={`Export ${trip.name}`}
@@ -3422,16 +3730,18 @@ function App() {
               )}
             </div>
 
-            <aside className="saved-format-panel" aria-label="Trip JSON format">
-              <div className="section-heading">
-                <h2>Export Format</h2>
-                <span>JSON</span>
-              </div>
-              <p className="format-copy">Saved trips export and import as versioned JSON files.</p>
-              <pre className="format-example" aria-label="Saved trip export JSON example">
-                <code>{exportFormatExample}</code>
-              </pre>
-            </aside>
+            {showExportFormatHelp && (
+              <aside className="saved-format-panel" aria-label="Trip JSON format">
+                <div className="section-heading">
+                  <h2>Export Format</h2>
+                  <span>JSON</span>
+                </div>
+                <p className="format-copy">Saved trips export and import as versioned JSON files.</p>
+                <pre className="format-example" aria-label="Saved trip export JSON example">
+                  <code>{exportFormatExample}</code>
+                </pre>
+              </aside>
+            )}
           </section>
         </main>
       )}
