@@ -262,6 +262,149 @@ function makeLockedStop(stop, order) {
   };
 }
 
+function getRemoteWorkDates(trip) {
+  return new Set(
+    trip.stops
+      .filter((stop) => stop.remoteWork && isDateOnly(stop.date))
+      .map((stop) => stop.date),
+  );
+}
+
+function compareDateOnly(first, second) {
+  if (isDateOnly(first) && isDateOnly(second)) return first.localeCompare(second);
+  if (isDateOnly(first)) return -1;
+  if (isDateOnly(second)) return 1;
+  return 0;
+}
+
+function insertStopByDate(stops, stopToInsert) {
+  const nextStops = [...stops];
+  const insertIndex = nextStops.findIndex((stop) => compareDateOnly(stop.date, stopToInsert.date) > 0);
+
+  if (insertIndex === -1) {
+    nextStops.push(stopToInsert);
+  } else {
+    nextStops.splice(insertIndex, 0, stopToInsert);
+  }
+
+  return nextStops;
+}
+
+function enforceRemoteWorkDates(originalTrip, proposedStops) {
+  const remoteWorkDates = getRemoteWorkDates(originalTrip);
+  if (!remoteWorkDates.size) {
+    return proposedStops.map((stop) => ({ ...stop, remoteWork: false }));
+  }
+
+  let stops = proposedStops.map((stop) => ({
+    ...stop,
+    remoteWork: isDateOnly(stop.date) && remoteWorkDates.has(stop.date),
+  }));
+  const proposedDates = new Set(stops.filter((stop) => isDateOnly(stop.date)).map((stop) => stop.date));
+
+  originalTrip.stops
+    .filter((stop) => stop.remoteWork && isDateOnly(stop.date) && !proposedDates.has(stop.date))
+    .forEach((missingRemoteStop) => {
+      stops = insertStopByDate(stops, {
+        ...missingRemoteStop,
+        id: `${missingRemoteStop.id}-remote-lock`,
+        remoteWork: true,
+      });
+      proposedDates.add(missingRemoteStop.date);
+    });
+
+  return stops;
+}
+
+function normalizeCityToken(value) {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getCityTokens(label) {
+  if (typeof label !== 'string') return [];
+
+  const [cityPart, statePart = ''] = label.split(',');
+  const state = normalizeCityToken(statePart);
+  const cityTokens = cityPart
+    .split(/\/|&|\band\b|\+/i)
+    .map(normalizeCityToken)
+    .filter(Boolean);
+  const tokens = cityTokens.map((city) => (state ? `${city} ${state}` : city));
+
+  if (cityTokens.length > 1) {
+    const combinedCity = normalizeCityToken(cityPart);
+    if (combinedCity) {
+      tokens.push(state ? `${combinedCity} ${state}` : combinedCity);
+    }
+  }
+
+  return Array.from(new Set(tokens));
+}
+
+function calculatePointMiles(previous, next) {
+  const earthRadiusMiles = 3958.8;
+  const dLat = ((next.lat - previous.lat) * Math.PI) / 180;
+  const dLng = ((next.lng - previous.lng) * Math.PI) / 180;
+  const lat1 = (previous.lat * Math.PI) / 180;
+  const lat2 = (next.lat * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) ** 2 +
+    Math.sin(dLng / 2) ** 2 * Math.cos(lat1) * Math.cos(lat2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+
+  return earthRadiusMiles * c;
+}
+
+function getAllowedFriendStays(originalTrip) {
+  return originalTrip.stops
+    .filter((stop) => stop.sleepingArrangement === 'friend' && typeof stop.friendName === 'string' && stop.friendName.trim())
+    .map((stop) => ({
+      friendName: stop.friendName.trim(),
+      cityTokens: getCityTokens(stop.label),
+      position: { lat: stop.lat, lng: stop.lng },
+    }));
+}
+
+function findAllowedFriendStay(stop, allowedFriendStays) {
+  const stopCityTokens = new Set(getCityTokens(stop.label));
+
+  return allowedFriendStays.find((friendStay) => {
+    if (friendStay.cityTokens.some((cityToken) => stopCityTokens.has(cityToken))) return true;
+
+    return calculatePointMiles(friendStay.position, { lat: stop.lat, lng: stop.lng }) <= 25;
+  });
+}
+
+function enforceFriendStayRules(stops, allowedFriendStays) {
+  return stops.map((stop) => {
+    if (stop.sleepingArrangement !== 'friend') {
+      return {
+        ...stop,
+        friendName: '',
+      };
+    }
+
+    const allowedFriendStay = findAllowedFriendStay(stop, allowedFriendStays);
+    if (allowedFriendStay) {
+      return {
+        ...stop,
+        friendName: allowedFriendStay.friendName,
+      };
+    }
+
+    return {
+      ...stop,
+      sleepingArrangement: 'camping',
+      friendName: '',
+    };
+  });
+}
+
 function buildRouteAssistantLocks(trip) {
   const start = trip.stops[0];
   const end = trip.stops[trip.stops.length - 1];
@@ -285,6 +428,11 @@ function buildRouteAssistantLocks(trip) {
       startDate: start.date,
       endDate: end.date,
     },
+    remoteWorkDates: Array.from(getRemoteWorkDates(trip)).sort(),
+    friendStayCities: getAllowedFriendStays(trip).map((friendStay) => ({
+      friendName: friendStay.friendName,
+      cityTokens: friendStay.cityTokens,
+    })),
   };
 }
 
@@ -292,6 +440,7 @@ function enforceRouteAssistantLocks(originalTrip, proposedTrip) {
   const lockedStart = originalTrip.stops[0];
   const lockedEnd = originalTrip.stops[originalTrip.stops.length - 1];
   const hasDistinctEnd = originalTrip.stops.length > 1;
+  const allowedFriendStays = getAllowedFriendStays(originalTrip);
   const proposedMiddle = proposedTrip.stops
     .filter((stop) => {
       if (isSameLockedStop(stop, lockedStart)) return false;
@@ -303,9 +452,11 @@ function enforceRouteAssistantLocks(originalTrip, proposedTrip) {
       date: clampDateToRange(stop.date, lockedStart.date, lockedEnd.date),
     }));
 
-  const stops = hasDistinctEnd
+  const lockedStops = hasDistinctEnd
     ? [makeLockedStop(lockedStart, 1), ...proposedMiddle, makeLockedStop(lockedEnd, proposedMiddle.length + 2)]
     : [makeLockedStop(lockedStart, 1), ...proposedMiddle];
+  const stops = enforceFriendStayRules(enforceRemoteWorkDates(originalTrip, lockedStops), allowedFriendStays)
+    .map((stop, index) => ({ ...stop, order: index + 1 }));
 
   return normalizeTrip({
     ...proposedTrip,
@@ -384,10 +535,13 @@ async function handleApi(request, response, url) {
           'The first and last stops are locked anchors. Keep them as the first and last stops with the same date, label, latitude, and longitude.',
           'The locked start/end date range cannot change. Keep all dated stops inside that inclusive range when both dates are known.',
           'If the user asks to change a locked start/end date or location, ignore that part and explain in the summary that those anchors stayed locked.',
-          'Preserve useful existing dates, notes, remoteWork flags, sleeping arrangements, friend names, and stops unless the user asks to change them.',
+          'Remote-work dates are locked. Keep the exact same calendar dates marked remoteWork=true as the input trip, do not add new remoteWork dates, and do not remove existing remoteWork dates.',
+          'Preserve useful existing dates, notes, sleeping arrangements, friend names, and stops unless the user asks to change them.',
           'Use approximate latitude and longitude for well-known places when adding stops.',
           'Every stop must have order starting at 1, a human-readable label, numeric lat/lng, notes, date, remoteWork, sleepingArrangement, and friendName.',
-          'sleepingArrangement must be camping, hotel, or friend. Use friendName only for friend stays and otherwise keep it as an empty string unless already useful.',
+          'sleepingArrangement must be camping, hotel, or friend. Never invent a friend stay or friendName.',
+          'Only use sleepingArrangement=friend in a city that already has an existing named friend stay in the supplied trip. Reuse that existing city friendName. Do not create friend stays in new cities, even if the user asks for one.',
+          'For any stop that is not an allowed same-city friend stay, friendName must be an empty string. For newly added stops, default sleepingArrangement to camping unless the user explicitly asks for hotel.',
           'Keep dates as YYYY-MM-DD strings when dates are known; otherwise use an empty string.',
           'Do not save anything. This is only a proposed draft trip for the user to review.',
         ].join(' '),
@@ -433,7 +587,7 @@ async function handleApi(request, response, url) {
     const anchoredTrip = enforceRouteAssistantLocks(trip, proposedTrip);
 
     sendJson(response, 200, {
-      summary: `${proposal.summary} Start/end date and locations stayed locked.`,
+      summary: `${proposal.summary} Start/end date and locations stayed locked. Remote-work dates and friend stays were kept constrained.`,
       trip: anchoredTrip,
     });
     return;
