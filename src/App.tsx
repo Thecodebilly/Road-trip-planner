@@ -1132,12 +1132,20 @@ function createEncodedTripShareUrl(trip: Trip) {
   return url.toString();
 }
 
-function createNamedUrlToken(name: string, id: string) {
-  return `${sanitizeFileName(name).slice(0, 64)}-${id}`;
+function createSavedRouteToken(name: string) {
+  return sanitizeFileName(name).slice(0, 96) || 'road-trip';
 }
 
-function savedRouteTokenMatchesId(token: string, tripId: string) {
-  return token === tripId || token.endsWith(`-${tripId}`);
+function savedRouteTokenMatchesTrip(token: string, trip: Pick<Trip, 'id' | 'name'>) {
+  const routeToken = createSavedRouteToken(trip.name);
+
+  return token === routeToken || token === trip.id || token === `${routeToken}-${trip.id}` || token.endsWith(`-${trip.id}`);
+}
+
+function findSavedRouteTokenConflict(trip: Pick<Trip, 'id' | 'name'>, trips: Array<Pick<Trip, 'id' | 'name'>>) {
+  const routeToken = createSavedRouteToken(trip.name);
+
+  return trips.find((savedTrip) => savedTrip.id !== trip.id && createSavedRouteToken(savedTrip.name) === routeToken);
 }
 
 function extractShareIdFromToken(token: string) {
@@ -1218,7 +1226,7 @@ function setSavedRouteUrl(trip: Pick<Trip, 'id' | 'name'>, replace = false) {
     hashParams.delete(param);
     url.searchParams.delete(param);
   });
-  hashParams.set(savedRouteParam, createNamedUrlToken(trip.name, trip.id));
+  hashParams.set(savedRouteParam, createSavedRouteToken(trip.name));
   url.searchParams.delete(savedRouteParam);
 
   const nextHash = hashParams.toString();
@@ -3111,6 +3119,12 @@ function App() {
         return;
       }
 
+      const routeTokenConflict = findSavedRouteTokenConflict(importedTrip, savedTrips);
+      if (routeTokenConflict) {
+        setSaveMessage(`Import blocked: #route=${createSavedRouteToken(importedTrip.name)} already exists`);
+        return;
+      }
+
       const nextSavedTrips = [
         importedTrip,
         ...savedTrips.filter((trip) => trip.id !== importedTrip.id),
@@ -3190,7 +3204,7 @@ function App() {
           workspaceId: activeWorkspaceId,
           createdAt: now,
           updatedAt: now,
-          name: result.trip.name || `${activeTrip.name} AI draft`,
+          name: activeTrip.name,
           documents: activeTrip.documents,
         },
         activeWorkspaceId,
@@ -3228,6 +3242,12 @@ function App() {
     const tripToSave =
       normalizeTrip({ ...activeTrip, workspaceId: activeWorkspaceId, stops, updatedAt: now }, activeWorkspaceId) ||
       activeTrip;
+    const routeTokenConflict = findSavedRouteTokenConflict(tripToSave, savedTrips);
+    if (routeTokenConflict) {
+      setSaveMessage(`Route URL #route=${createSavedRouteToken(tripToSave.name)} already exists. Rename this trip before saving.`);
+      return;
+    }
+
     const nextSavedTrips = [
       tripToSave,
       ...savedTrips.filter((trip) => trip.id !== tripToSave.id),
@@ -3447,7 +3467,7 @@ function App() {
         return;
       }
 
-      const savedRoute = savedTrips.find((trip) => savedRouteTokenMatchesId(routeToken, trip.id));
+      const savedRoute = savedTrips.find((trip) => savedRouteTokenMatchesTrip(routeToken, trip));
       if (savedRoute) {
         if (activeTrip.id !== savedRoute.id || currentView !== 'editor') {
           loadTrip(savedRoute, { syncUrl: false });
@@ -3477,8 +3497,13 @@ function App() {
 
   const removeSavedTrip = async (tripId: string) => {
     const nextSavedTrips = savedTrips.filter((trip) => trip.id !== tripId);
+    const removedTrip = savedTrips.find((trip) => trip.id === tripId);
     setSavedTrips(nextSavedTrips);
-    if (savedRouteTokenMatchesId(getSavedRouteIdFromUrl(), tripId)) {
+    if (
+      removedTrip
+        ? savedRouteTokenMatchesTrip(getSavedRouteIdFromUrl(), removedTrip)
+        : getSavedRouteIdFromUrl() === tripId
+    ) {
       clearSavedRouteUrl(true);
     }
 
@@ -4580,7 +4605,7 @@ function App() {
                   value={newTripPrompt}
                   onChange={(event) => setNewTripPrompt(event.currentTarget.value)}
                   placeholder="Plan a two-week camping-focused road trip from Jacksonville to Denver in June, with remote work on weekdays, national parks, and no car leg over 10 hours."
-                  rows={10}
+                  rows={6}
                   maxLength={routeAssistantPromptMaxLength}
                 />
                 {newTripAssistantMessage && (

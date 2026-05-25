@@ -717,18 +717,19 @@ function findAllowedFriendStay(stop, allowedFriendStays) {
 
 function enforceFriendStayRules(stops, allowedFriendStays) {
   return stops.map((stop) => {
-    if (stop.sleepingArrangement !== 'friend') {
-      return {
-        ...stop,
-        friendName: '',
-      };
-    }
-
     const allowedFriendStay = findAllowedFriendStay(stop, allowedFriendStays);
     if (allowedFriendStay) {
       return {
         ...stop,
+        sleepingArrangement: 'friend',
         friendName: allowedFriendStay.friendName,
+      };
+    }
+
+    if (stop.sleepingArrangement !== 'friend') {
+      return {
+        ...stop,
+        friendName: '',
       };
     }
 
@@ -1156,8 +1157,8 @@ async function handleApi(request, response, url) {
           'Use approximate latitude and longitude for well-known places when adding stops.',
           'Every stop must have order starting at 1, a human-readable label, numeric lat/lng, notes, date, remoteWork, sleepingArrangement, friendName, and travelMode.',
           'sleepingArrangement must be camping, hotel, or friend. Never invent a friend stay or friendName.',
-          'Only use sleepingArrangement=friend in a city that already has an existing named friend stay in the supplied trip. Reuse that existing city friendName. Do not create friend stays in new cities, even if the user asks for one.',
-          'For any stop that is not an allowed same-city friend stay, friendName must be an empty string. For newly added stops, default sleepingArrangement to camping unless the user explicitly asks for hotel.',
+          'Use sleepingArrangement=friend for stops in cities that already have an existing named friend stay in the supplied trip. Reuse that existing city friendName, even for newly added stops in that same city.',
+          'Do not create friend stays in new cities, even if the user asks for one. For any stop that is not an allowed same-city friend stay, friendName must be an empty string. For newly added non-friend stops, default sleepingArrangement to camping unless the user explicitly asks for hotel.',
           'Keep dates as YYYY-MM-DD strings when dates are known; otherwise use an empty string.',
           'Do not save anything. This is only a proposed draft trip for the user to review.',
         ].join(' '),

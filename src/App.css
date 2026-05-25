@@ -77,8 +77,8 @@ button {
 }
 
 .route-assistant-form textarea {
-  min-height: 76px;
-  max-height: 220px;
+  min-height: 54px;
+  max-height: 150px;
   resize: vertical;
 }
 
@@ -1138,7 +1138,7 @@ textarea:focus {
 }
 
 .new-trip-ai-form textarea {
-  min-height: 240px;
+  min-height: 160px;
   resize: vertical;
   line-height: 1.5;
 }
@@ -1934,6 +1934,6 @@ code {
   }
 
   .new-trip-ai-form textarea {
-    min-height: 210px;
+    min-height: 140px;
   }
 }
