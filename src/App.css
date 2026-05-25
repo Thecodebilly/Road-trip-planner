@@ -505,7 +505,10 @@ textarea:focus {
 }
 
 .stop-card.remote {
-  box-shadow: inset -4px 0 0 #9f2d55;
+  background: linear-gradient(90deg, var(--sleep-bg), #ffffff 42%, #fff2f6 100%);
+  box-shadow:
+    inset -7px 0 0 #9f2d55,
+    0 0 0 2px rgba(159, 45, 85, 0.14);
 }
 
 .stop-card.weekend {
@@ -516,8 +519,9 @@ textarea:focus {
 
 .stop-card.remote.weekend {
   box-shadow:
-    inset -4px 0 0 #9f2d55,
-    0 0 0 2px rgba(240, 180, 41, 0.24);
+    inset -7px 0 0 #9f2d55,
+    0 0 0 2px rgba(159, 45, 85, 0.14),
+    0 0 0 5px rgba(240, 180, 41, 0.24);
 }
 
 .stop-card:hover,
@@ -533,7 +537,8 @@ textarea:focus {
 .stop-card.selected.remote {
   box-shadow:
     inset 3px 0 0 var(--sleep-color),
-    inset -4px 0 0 #9f2d55;
+    inset -7px 0 0 #9f2d55,
+    0 0 0 2px rgba(159, 45, 85, 0.16);
 }
 
 .stop-card.selected.weekend {
@@ -545,8 +550,9 @@ textarea:focus {
 .stop-card.selected.remote.weekend {
   box-shadow:
     inset 3px 0 0 var(--sleep-color),
-    inset -4px 0 0 #9f2d55,
-    0 0 0 2px rgba(240, 180, 41, 0.24);
+    inset -7px 0 0 #9f2d55,
+    0 0 0 2px rgba(159, 45, 85, 0.16),
+    0 0 0 5px rgba(240, 180, 41, 0.24);
 }
 
 .stop-index {
@@ -647,8 +653,9 @@ textarea:focus {
 }
 
 .stop-tag.remote {
-  background: #fdecef;
-  color: #9f2d55;
+  background: #9f2d55;
+  color: #ffffff;
+  box-shadow: 0 0 0 2px rgba(159, 45, 85, 0.16);
 }
 
 .stop-tag.weekend {
@@ -662,15 +669,18 @@ textarea:focus {
 }
 
 .mini-badge {
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
   border-radius: 999px;
-  color: #9f2d55;
-  background: #fdecef;
+  color: #ffffff;
+  background: #9f2d55;
+  box-shadow:
+    0 0 0 3px rgba(159, 45, 85, 0.16),
+    0 6px 14px rgba(159, 45, 85, 0.24);
 }
 
 .saved-section {
@@ -1073,6 +1083,7 @@ textarea:focus {
   --marker-color: #0f766e;
   min-width: 28px;
   height: 28px;
+  position: relative;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -1115,6 +1126,19 @@ textarea:focus {
   box-shadow:
     0 0 0 3px rgba(159, 45, 85, 0.35),
     0 8px 18px rgba(23, 32, 42, 0.24);
+}
+
+.map-stop-marker.remote::after {
+  content: "";
+  width: 11px;
+  height: 11px;
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  border: 2px solid #ffffff;
+  border-radius: 999px;
+  background: #9f2d55;
+  box-shadow: 0 2px 6px rgba(23, 32, 42, 0.22);
 }
 
 .map-stop-marker.weekend {

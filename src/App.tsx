@@ -2554,7 +2554,7 @@ function App() {
                           <span className={`stop-tag ${getSleepClass(stop.sleepingArrangement)}`}>
                             {formatSleepingArrangementLabel(stop.sleepingArrangement)}
                           </span>
-                          {stop.remoteWork && <span className="stop-tag remote">Remote</span>}
+                          {stop.remoteWork && <span className="stop-tag remote">Remote work</span>}
                           {stopIsWeekend && <span className="stop-tag weekend">Weekend</span>}
                         </span>
                       </span>
@@ -3582,7 +3582,7 @@ function MapCanvas({
                   <span className={`stop-tag ${getSleepClass(selectedStop.sleepingArrangement)}`}>
                     {formatSleepingArrangementLabel(selectedStop.sleepingArrangement)}
                   </span>
-                  {selectedStop.remoteWork && <span className="stop-tag remote">Remote</span>}
+                  {selectedStop.remoteWork && <span className="stop-tag remote">Remote work</span>}
                   {isWeekendDate(selectedStop.date) && <span className="stop-tag weekend">Weekend</span>}
                 </span>
               </>
