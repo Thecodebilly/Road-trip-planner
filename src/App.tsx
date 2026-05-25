@@ -34,6 +34,9 @@ import {
 } from 'lucide-react';
 import tripStops from './tripStops.json';
 
+type SleepingArrangement = 'camping' | 'hotel' | 'friend';
+type HotelRegion = 'Northeast' | 'South' | 'Midwest' | 'West';
+
 type ImportedTripStop = {
   order: number;
   date: string;
@@ -42,10 +45,14 @@ type ImportedTripStop = {
   lng: number;
   notes: string;
   remoteWork?: boolean;
+  sleepingArrangement?: SleepingArrangement;
+  friendName?: string;
 };
 
-type TripStop = ImportedTripStop & {
+type TripStop = Omit<ImportedTripStop, 'sleepingArrangement' | 'friendName'> & {
   id: string;
+  sleepingArrangement: SleepingArrangement;
+  friendName: string;
 };
 
 type DriveEstimate = {
@@ -83,6 +90,22 @@ type HotelCandidate = {
   searchLabel: string;
   distanceFromSearchMiles: number;
   score: number;
+};
+
+type CachedRouteLeg = Pick<DriveEstimate, 'distanceMiles' | 'durationMinutes' | 'source'>;
+
+type CachedRoute = {
+  version: 1;
+  routePaths: google.maps.LatLngLiteral[][];
+  distanceMiles: number | null;
+  routeLegs: CachedRouteLeg[];
+  hotelSearchPoints: HotelSearchPoint[];
+};
+
+type CacheRecord<T> = {
+  key: string;
+  savedAt: number;
+  value: T;
 };
 
 type Trip = {
@@ -157,15 +180,82 @@ const savedTripsKey = 'road-trip-planner.savedTrips.v1';
 const activeTripKey = 'road-trip-planner.activeTrip.v1';
 const gasPriceKey = 'road-trip-planner.gasPrice.v1';
 const fuelMpgKey = 'road-trip-planner.fuelMpg.v1';
+const routeCacheKey = 'road-trip-planner.routeCache.v1';
+const hotelCacheKey = 'road-trip-planner.hotelCache.v1';
 const defaultTripId = 'default-2026-usa-itinerary';
 const tripExportFormat = 'road-trip-planner.saved-trip.v1';
 const maxStopsPerDirectionsRequest = 25;
 const maxHotelSearchPoints = 8;
 const maxHotelCandidates = 12;
 const hotelSearchRadiusMeters = 16093;
+const routeCacheTtlMs = 7 * 24 * 60 * 60 * 1000;
+const hotelCacheTtlMs = 24 * 60 * 60 * 1000;
+const maxRouteCacheEntries = 12;
+const maxHotelCacheEntries = 80;
 const defaultGasPrice = 3.5;
 const defaultFuelMpg = 25;
 const estimatedAverageMph = 55;
+const sleepingArrangementOptions: SleepingArrangement[] = ['camping', 'hotel', 'friend'];
+// Broad nightly assumptions for planning totals; live hotel search still shows actual nearby options.
+const hotelRegionAverageNightlyRates: Record<HotelRegion, number> = {
+  Northeast: 175,
+  South: 135,
+  Midwest: 125,
+  West: 185,
+};
+const stateHotelRegions: Record<string, HotelRegion> = {
+  AL: 'South',
+  AK: 'West',
+  AZ: 'West',
+  AR: 'South',
+  CA: 'West',
+  CO: 'West',
+  CT: 'Northeast',
+  DE: 'South',
+  DC: 'South',
+  FL: 'South',
+  GA: 'South',
+  HI: 'West',
+  ID: 'West',
+  IL: 'Midwest',
+  IN: 'Midwest',
+  IA: 'Midwest',
+  KS: 'Midwest',
+  KY: 'South',
+  LA: 'South',
+  ME: 'Northeast',
+  MD: 'South',
+  MA: 'Northeast',
+  MI: 'Midwest',
+  MN: 'Midwest',
+  MS: 'South',
+  MO: 'Midwest',
+  MT: 'West',
+  NE: 'Midwest',
+  NV: 'West',
+  NH: 'Northeast',
+  NJ: 'Northeast',
+  NM: 'West',
+  NY: 'Northeast',
+  NC: 'South',
+  ND: 'Midwest',
+  OH: 'Midwest',
+  OK: 'South',
+  OR: 'West',
+  PA: 'Northeast',
+  RI: 'Northeast',
+  SC: 'South',
+  SD: 'Midwest',
+  TN: 'South',
+  TX: 'South',
+  UT: 'West',
+  VT: 'Northeast',
+  VA: 'South',
+  WA: 'West',
+  WV: 'South',
+  WI: 'Midwest',
+  WY: 'West',
+};
 const exportFormatExample = JSON.stringify(
   {
     format: tripExportFormat,
@@ -186,6 +276,8 @@ const exportFormatExample = JSON.stringify(
           lng: -81.6557,
           notes: 'Start',
           remoteWork: false,
+          sleepingArrangement: 'camping',
+          friendName: '',
         },
       ],
     },
@@ -200,6 +292,8 @@ const seedStops = [...(tripStops as ImportedTripStop[])]
     ...stop,
     id: `seed-stop-${stop.order}`,
     order: index + 1,
+    sleepingArrangement: normalizeSleepingArrangement(stop.sleepingArrangement),
+    friendName: typeof stop.friendName === 'string' ? stop.friendName : '',
   }));
 
 const mapStyles: google.maps.MapTypeStyle[] = [
@@ -237,6 +331,12 @@ function resequenceStops(stops: TripStop[]) {
     .map((stop, index) => ({ ...stop, order: index + 1 }));
 }
 
+function normalizeSleepingArrangement(value: unknown): SleepingArrangement {
+  return sleepingArrangementOptions.includes(value as SleepingArrangement)
+    ? (value as SleepingArrangement)
+    : 'camping';
+}
+
 function normalizeTrip(candidate: Partial<Trip> | null | undefined): Trip | null {
   if (!candidate || !Array.isArray(candidate.stops)) return null;
 
@@ -252,6 +352,8 @@ function normalizeTrip(candidate: Partial<Trip> | null | undefined): Trip | null
       lng: Number.isFinite(stop.lng) ? stop.lng : usCenter.lng,
       notes: typeof stop.notes === 'string' ? stop.notes : '',
       remoteWork: Boolean(stop.remoteWork),
+      sleepingArrangement: normalizeSleepingArrangement(stop.sleepingArrangement),
+      friendName: typeof stop.friendName === 'string' ? stop.friendName : '',
     }));
 
   return {
@@ -294,6 +396,8 @@ function createBlankTrip(): Trip {
         lng: usCenter.lng,
         notes: '',
         remoteWork: false,
+        sleepingArrangement: 'camping',
+        friendName: '',
       },
     ],
     createdAt: now,
@@ -350,6 +454,42 @@ function removeStorage(key: string) {
   } catch {
     // localStorage can be unavailable in private browsing or locked-down embeds.
   }
+}
+
+function readCacheRecords<T>(key: string): CacheRecord<T>[] {
+  try {
+    const saved = window.localStorage.getItem(key);
+    const parsed = saved ? JSON.parse(saved) : [];
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed.filter(
+      (record): record is CacheRecord<T> =>
+        record &&
+        typeof record === 'object' &&
+        typeof record.key === 'string' &&
+        typeof record.savedAt === 'number' &&
+        'value' in record,
+    );
+  } catch {
+    return [];
+  }
+}
+
+function getCachedValue<T>(storageKey: string, key: string, ttlMs: number) {
+  const now = Date.now();
+  const records = readCacheRecords<T>(storageKey).filter((record) => now - record.savedAt <= ttlMs);
+  const match = records.find((record) => record.key === key);
+
+  return match?.value || null;
+}
+
+function setCachedValue<T>(storageKey: string, key: string, value: T, maxEntries: number) {
+  const nextRecords = [
+    { key, value, savedAt: Date.now() },
+    ...readCacheRecords<T>(storageKey).filter((record) => record.key !== key),
+  ].slice(0, maxEntries);
+
+  writeStorage(storageKey, nextRecords);
 }
 
 function sortTripsByUpdatedAt(trips: Trip[]) {
@@ -633,6 +773,76 @@ function calculateSegmentMiles(previous: TripStop, next: TripStop) {
   return calculatePointMiles(previous, next);
 }
 
+function findClosestStopIndex(position: google.maps.LatLngLiteral, stops: TripStop[]) {
+  if (!stops.length) return -1;
+
+  return stops.reduce((closestIndex, stop, index) => {
+    const closestStop = stops[closestIndex];
+    const closestMiles = calculatePointMiles(position, closestStop);
+    const stopMiles = calculatePointMiles(position, stop);
+
+    return stopMiles < closestMiles ? index : closestIndex;
+  }, 0);
+}
+
+function calculateInsertionAddedMiles(
+  stops: TripStop[],
+  position: google.maps.LatLngLiteral,
+  insertionIndex: number,
+) {
+  const previousStop = stops[insertionIndex - 1];
+  const nextStop = stops[insertionIndex];
+
+  if (previousStop && nextStop) {
+    return (
+      calculatePointMiles(previousStop, position) +
+      calculatePointMiles(position, nextStop) -
+      calculatePointMiles(previousStop, nextStop)
+    );
+  }
+
+  if (previousStop) return calculatePointMiles(previousStop, position);
+  if (nextStop) return calculatePointMiles(position, nextStop);
+  return 0;
+}
+
+function findDroppedPinInsertion(position: google.maps.LatLngLiteral, stops: TripStop[]) {
+  if (!stops.length) {
+    return {
+      closestStop: null,
+      closestIndex: -1,
+      insertionIndex: 0,
+    };
+  }
+
+  if (stops.length === 1) {
+    return {
+      closestStop: stops[0],
+      closestIndex: 0,
+      insertionIndex: 1,
+    };
+  }
+
+  const closestIndex = findClosestStopIndex(position, stops);
+  const candidateIndexes = [
+    closestIndex > 0 ? closestIndex : null,
+    closestIndex < stops.length - 1 ? closestIndex + 1 : null,
+  ].filter((index): index is number => index !== null);
+
+  const insertionIndex = candidateIndexes.reduce((bestIndex, candidateIndex) => {
+    const bestAddedMiles = calculateInsertionAddedMiles(stops, position, bestIndex);
+    const candidateAddedMiles = calculateInsertionAddedMiles(stops, position, candidateIndex);
+
+    return candidateAddedMiles < bestAddedMiles ? candidateIndex : bestIndex;
+  }, candidateIndexes[0]);
+
+  return {
+    closestStop: stops[closestIndex],
+    closestIndex,
+    insertionIndex,
+  };
+}
+
 function metersToMiles(meters: number) {
   return meters / 1609.344;
 }
@@ -694,6 +904,76 @@ function buildRoadDriveEstimates(routes: RoadRoute[], stops: TripStop[]) {
   return estimates;
 }
 
+function cacheRouteLegs(estimates: DriveEstimate[]): CachedRouteLeg[] {
+  return estimates.map(({ distanceMiles, durationMinutes, source }) => ({
+    distanceMiles,
+    durationMinutes,
+    source,
+  }));
+}
+
+function buildCachedDriveEstimates(routeLegs: CachedRouteLeg[], stops: TripStop[]) {
+  return routeLegs.slice(0, Math.max(0, stops.length - 1)).map((leg, index) => ({
+    fromStopId: stops[index].id,
+    toStopId: stops[index + 1].id,
+    distanceMiles: leg.distanceMiles,
+    durationMinutes: leg.durationMinutes,
+    source: leg.source,
+  }));
+}
+
+function isPosition(value: unknown): value is google.maps.LatLngLiteral {
+  return (
+    Boolean(value) &&
+    typeof value === 'object' &&
+    Number.isFinite((value as google.maps.LatLngLiteral).lat) &&
+    Number.isFinite((value as google.maps.LatLngLiteral).lng)
+  );
+}
+
+function readCachedRoute(key: string, stops: TripStop[]) {
+  const cachedRoute = getCachedValue<CachedRoute>(routeCacheKey, key, routeCacheTtlMs);
+  if (!cachedRoute || cachedRoute.version !== 1) return null;
+  if (!Array.isArray(cachedRoute.routePaths) || !Array.isArray(cachedRoute.routeLegs)) return null;
+  if (cachedRoute.routeLegs.length !== Math.max(0, stops.length - 1)) return null;
+
+  const routePaths = cachedRoute.routePaths
+    .map((routePath) => (Array.isArray(routePath) ? routePath.filter(isPosition).map((position) => roundPosition(position)) : []))
+    .filter((routePath) => routePath.length > 1);
+
+  if (!routePaths.length) return null;
+
+  return {
+    routePaths,
+    distanceMiles: Number.isFinite(cachedRoute.distanceMiles) ? cachedRoute.distanceMiles : null,
+    driveEstimates: buildCachedDriveEstimates(cachedRoute.routeLegs, stops),
+    hotelSearchPoints: Array.isArray(cachedRoute.hotelSearchPoints)
+      ? cachedRoute.hotelSearchPoints.filter((point) => point && typeof point.id === 'string' && isPosition(point.position))
+      : buildRouteHotelSearchPoints(routePaths, stops),
+  };
+}
+
+function writeCachedRoute(
+  key: string,
+  routePaths: google.maps.LatLngLiteral[][],
+  distanceMiles: number | null,
+  driveEstimates: DriveEstimate[],
+  hotelSearchPoints: HotelSearchPoint[],
+) {
+  setCachedValue<CachedRoute>(
+    routeCacheKey,
+    key,
+    {
+      version: 1,
+      routePaths,
+      distanceMiles,
+      routeLegs: cacheRouteLegs(driveEstimates),
+      hotelSearchPoints,
+    },
+    maxRouteCacheEntries,
+  );
+}
+
 function sumDriveMiles(estimates: DriveEstimate[]) {
   return Math.round(estimates.reduce((total, estimate) => total + estimate.distanceMiles, 0));
 }
@@ -708,12 +988,83 @@ function calculateGasCost(miles: number, gasPrice: number, fuelMpg: number) {
   return (miles / fuelMpg) * gasPrice;
 }
 
-function formatGasCost(miles: number, gasPrice: number, fuelMpg: number) {
+function formatCurrency(value: number) {
   return new Intl.NumberFormat('en-US', {
     style: 'currency',
     currency: 'USD',
     maximumFractionDigits: 0,
-  }).format(calculateGasCost(miles, gasPrice, fuelMpg));
+  }).format(value);
+}
+
+function formatGasCost(miles: number, gasPrice: number, fuelMpg: number) {
+  return formatCurrency(calculateGasCost(miles, gasPrice, fuelMpg));
+}
+
+function extractStateAbbreviation(label: string) {
+  const matches = [...label.toUpperCase().matchAll(/\b([A-Z]{2})\b/g)]
+    .map((match) => match[1])
+    .filter((state) => state in stateHotelRegions);
+
+  return matches.length ? matches[matches.length - 1] : null;
+}
+
+function getHotelRegion(stop: Pick<TripStop, 'label' | 'lat' | 'lng'>): HotelRegion {
+  const state = extractStateAbbreviation(stop.label);
+  if (state) return stateHotelRegions[state];
+
+  if (stop.lng <= -104) return 'West';
+  if (stop.lng >= -80 && stop.lat >= 37) return 'Northeast';
+  if (stop.lat >= 36 && stop.lng > -104 && stop.lng < -80) return 'Midwest';
+  return 'South';
+}
+
+function getHotelAverageNightlyRate(stop: TripStop) {
+  return hotelRegionAverageNightlyRates[getHotelRegion(stop)];
+}
+
+function parseStopDate(date: string) {
+  if (!date) return null;
+
+  const parsed = new Date(`${date}T00:00:00`);
+  return Number.isNaN(parsed.getTime()) ? null : parsed;
+}
+
+function getStopNightCount(stops: TripStop[], stopIndex: number) {
+  const stopDate = parseStopDate(stops[stopIndex]?.date || '');
+  const nextDate = parseStopDate(stops[stopIndex + 1]?.date || '');
+
+  if (!stopDate || !nextDate) return 1;
+
+  const days = Math.round((nextDate.getTime() - stopDate.getTime()) / 86400000);
+  return Math.max(1, days);
+}
+
+function calculateStopLodgingCost(stops: TripStop[], stopIndex: number) {
+  const stop = stops[stopIndex];
+  if (!stop || stop.sleepingArrangement !== 'hotel') return 0;
+
+  return getHotelAverageNightlyRate(stop) * getStopNightCount(stops, stopIndex);
+}
+
+function calculateLodgingCost(stops: TripStop[]) {
+  return stops.reduce((total, _stop, index) => total + calculateStopLodgingCost(stops, index), 0);
+}
+
+function formatSleepingArrangementSummary(stop: TripStop, stopIndex: number, stops: TripStop[]) {
+  if (stop.sleepingArrangement === 'hotel') {
+    const region = getHotelRegion(stop);
+    const nights = getStopNightCount(stops, stopIndex);
+    const nightlyRate = getHotelAverageNightlyRate(stop);
+    return `Hotel ${formatCurrency(nightlyRate)} avg/night in ${region} (${nights} ${
+      nights === 1 ? 'night' : 'nights'
+    })`;
+  }
+
+  if (stop.sleepingArrangement === 'friend') {
+    return stop.friendName.trim() ? `Staying with ${stop.friendName.trim()}` : 'Staying with friend';
+  }
+
+  return 'Camping';
 }
 
 function formatDriveDuration(minutes: number) {
@@ -842,16 +1193,40 @@ function buildStopHotelSearchPoints(stops: TripStop[]) {
   );
 }
 
-function buildRouteHotelSearchPoints(polylines: google.maps.Polyline[], stops: TripStop[]) {
-  const routePositions = polylines.flatMap((polyline) =>
-    polyline
-      .getPath()
-      .getArray()
-      .map((position) => ({ lat: position.lat(), lng: position.lng() })),
-  );
+function roundPosition(position: google.maps.LatLngLiteral, precision = 5) {
+  return {
+    lat: Number(position.lat.toFixed(precision)),
+    lng: Number(position.lng.toFixed(precision)),
+  };
+}
+
+function buildRouteCacheKey(stops: TripStop[]) {
+  return stops.map((stop) => `${stop.lat.toFixed(5)},${stop.lng.toFixed(5)}`).join('|');
+}
+
+function buildHotelPointCacheKey(searchPoint: HotelSearchPoint) {
+  return `${searchPoint.position.lat.toFixed(3)},${searchPoint.position.lng.toFixed(3)}`;
+}
+
+function buildRouteHotelSearchPoints(routePaths: google.maps.LatLngLiteral[][], stops: TripStop[]) {
+  const routePositions = routePaths.flat();
   const sampledRoutePoints = samplePositions(routePositions, maxHotelSearchPoints, 'route', 'Route area');
 
   return sampledRoutePoints.length ? sampledRoutePoints : buildStopHotelSearchPoints(stops);
+}
+
+function extractRoutePaths(routes: RoadRoute[]) {
+  return routes.flatMap((route) =>
+    route
+      .createPolylines()
+      .map((polyline) =>
+        polyline
+          .getPath()
+          .getArray()
+          .map((position) => roundPosition({ lat: position.lat(), lng: position.lng() })),
+      )
+      .filter((routePath) => routePath.length > 1),
+  );
 }
 
 function normalizeHotelPlace(
@@ -880,6 +1255,52 @@ function normalizeHotelPlace(
     distanceFromSearchMiles,
     score: scoreHotelCandidate(priceLevel, rating, userRatingsTotal, distanceFromSearchMiles),
   };
+}
+
+function normalizeCachedHotelCandidate(candidate: HotelCandidate, searchPoint: HotelSearchPoint) {
+  if (!candidate || typeof candidate.id !== 'string' || typeof candidate.name !== 'string') return null;
+  if (!isPosition(candidate.position)) return null;
+
+  const priceLevel = typeof candidate.priceLevel === 'number'
+    ? candidate.priceLevel as google.maps.places.PriceLevel
+    : null;
+  const rating = typeof candidate.rating === 'number' ? candidate.rating : null;
+  const userRatingsTotal = typeof candidate.userRatingsTotal === 'number' ? candidate.userRatingsTotal : null;
+  const distanceFromSearchMiles = calculatePointMiles(candidate.position, searchPoint.position);
+
+  return {
+    ...candidate,
+    position: roundPosition(candidate.position, 6),
+    rating,
+    userRatingsTotal,
+    priceLevel,
+    vicinity: typeof candidate.vicinity === 'string' ? candidate.vicinity : '',
+    searchLabel: searchPoint.label,
+    distanceFromSearchMiles,
+    score: scoreHotelCandidate(priceLevel, rating, userRatingsTotal, distanceFromSearchMiles),
+  };
+}
+
+function readCachedHotelCandidates(searchPoint: HotelSearchPoint) {
+  const cachedCandidates = getCachedValue<HotelCandidate[]>(
+    hotelCacheKey,
+    buildHotelPointCacheKey(searchPoint),
+    hotelCacheTtlMs,
+  );
+  if (!Array.isArray(cachedCandidates)) return null;
+
+  return cachedCandidates
+    .map((candidate) => normalizeCachedHotelCandidate(candidate, searchPoint))
+    .filter((candidate): candidate is HotelCandidate => Boolean(candidate));
+}
+
+function writeCachedHotelCandidates(searchPoint: HotelSearchPoint, candidates: HotelCandidate[]) {
+  setCachedValue<HotelCandidate[]>(
+    hotelCacheKey,
+    buildHotelPointCacheKey(searchPoint),
+    candidates,
+    maxHotelCacheEntries,
+  );
 }
 
 async function searchHotelsNearPoint(
@@ -947,6 +1368,19 @@ async function requestRoadRoute(routeLibrary: RoadRoutesLibrary, stops: TripStop
   return route;
 }
 
+function isRouteQuotaError(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  return /RESOURCE_EXHAUSTED|quota/i.test(message);
+}
+
+function formatRouteFallbackMessage(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+
+  if (isRouteQuotaError(error)) return 'Routes API daily quota reached';
+  if (message.includes('ROUTES_LIBRARY_UNAVAILABLE')) return 'Routes library unavailable';
+  return 'Driving route unavailable';
+}
+
 function calculateRoadRouteMiles(routes: RoadRoute[]) {
   const meters = routes.reduce((total, route) => total + (route.distanceMeters || 0), 0);
 
@@ -988,6 +1422,10 @@ function App() {
     () => stops.find((stop) => stop.id === selectedStopId) || null,
     [selectedStopId, stops],
   );
+  const selectedStopIndex = useMemo(
+    () => (selectedStop ? stops.findIndex((stop) => stop.id === selectedStop.id) : -1),
+    [selectedStop, stops],
+  );
   const estimatedDriveEstimates = useMemo(() => buildEstimatedDriveEstimates(stops), [stops]);
   const driveEstimates = roadDriveEstimates || estimatedDriveEstimates;
   const driveEstimateByStopId = useMemo(
@@ -997,7 +1435,11 @@ function App() {
   const hasRoadDriveEstimates = Boolean(roadDriveEstimates?.some((estimate) => estimate.source === 'road'));
   const displayMiles = drivingMiles ?? sumDriveMiles(estimatedDriveEstimates);
   const displayDriveMinutes = sumDriveMinutes(driveEstimates);
+  const gasCost = calculateGasCost(displayMiles, gasPrice, fuelMpg);
+  const lodgingCost = useMemo(() => calculateLodgingCost(stops), [stops]);
   const displayGasCost = formatGasCost(displayMiles, gasPrice, fuelMpg);
+  const displayLodgingCost = formatCurrency(lodgingCost);
+  const displayTripTotal = formatCurrency(gasCost + lodgingCost);
   const remoteStops = useMemo(() => stops.filter((stop) => stop.remoteWork).length, [stops]);
   const dateRange = useMemo(() => formatStopDateRange(stops), [stops]);
   const saveBackendLabel =
@@ -1142,19 +1584,24 @@ function App() {
     label = 'Dropped pin',
     notes = 'Added from map pin.',
   ) => {
-    const anchorIndex = selectedStop
-      ? stops.findIndex((stop) => stop.id === selectedStop.id)
-      : stops.length - 1;
-    const order = Math.max(anchorIndex + 2, 1);
+    const pinPosition = {
+      lat: Number(position.lat.toFixed(6)),
+      lng: Number(position.lng.toFixed(6)),
+    };
+    const { closestStop, closestIndex, insertionIndex } = findDroppedPinInsertion(pinPosition, stops);
+    const order = insertionIndex + 1;
+    const placement = closestStop && insertionIndex <= closestIndex ? 'before' : 'after';
     const newStop: TripStop = {
       id: makeId('stop'),
       order,
-      date: selectedStop?.date || '',
+      date: closestStop?.date || '',
       label,
-      lat: Number(position.lat.toFixed(6)),
-      lng: Number(position.lng.toFixed(6)),
+      lat: pinPosition.lat,
+      lng: pinPosition.lng,
       notes,
       remoteWork: false,
+      sleepingArrangement: 'camping',
+      friendName: '',
     };
 
     touchTrip((trip) => {
@@ -1164,7 +1611,11 @@ function App() {
     });
     setSelectedStopId(newStop.id);
     setIsPlacingPin(false);
-    setLocationMessage(`Added ${label}`);
+    setLocationMessage(
+      closestStop
+        ? `Added ${label} near ${closestStop.label}; optimized ${placement} that stop.`
+        : `Added ${label}`,
+    );
     setFitSignal((value) => value + 1);
   };
 
@@ -1218,6 +1669,8 @@ function App() {
       lng: selectedStop?.lng || usCenter.lng,
       notes: '',
       remoteWork: false,
+      sleepingArrangement: 'camping',
+      friendName: '',
     };
 
     touchTrip((trip) => {
@@ -1482,6 +1935,18 @@ function App() {
     updateStop(selectedStop.id, { remoteWork: event.currentTarget.checked });
   };
 
+  const handleSleepingArrangementChange = (event: ChangeEvent<HTMLSelectElement>) => {
+    if (!selectedStop) return;
+    updateStop(selectedStop.id, {
+      sleepingArrangement: normalizeSleepingArrangement(event.currentTarget.value),
+    });
+  };
+
+  const handleFriendNameChange = (event: ChangeEvent<HTMLInputElement>) => {
+    if (!selectedStop) return;
+    updateStop(selectedStop.id, { friendName: event.currentTarget.value });
+  };
+
   return (
     <div className="app-shell">
       <header className="topbar">
@@ -1637,6 +2102,14 @@ function App() {
                 <span>Est. gas</span>
               </div>
               <div>
+                <strong>{displayLodgingCost}</strong>
+                <span>Lodging</span>
+              </div>
+              <div>
+                <strong>{displayTripTotal}</strong>
+                <span>Trip total</span>
+              </div>
+              <div>
                 <strong>{remoteStops}</strong>
                 <span>Remote</span>
               </div>
@@ -1728,7 +2201,7 @@ function App() {
               <span>{stops.length}</span>
             </div>
             <ol className="stop-list">
-              {stops.map((stop) => {
+              {stops.map((stop, stopIndex) => {
                 const driveEstimate = driveEstimateByStopId.get(stop.id);
 
                 return (
@@ -1751,6 +2224,12 @@ function App() {
                           <small className="drive-summary">
                             <Route size={14} />
                             {formatDriveSummary(driveEstimate, gasPrice, fuelMpg)}
+                          </small>
+                        )}
+                        {stop.sleepingArrangement !== 'camping' && (
+                          <small className="lodging-summary">
+                            <BedDouble size={14} />
+                            {formatSleepingArrangementSummary(stop, stopIndex, stops)}
                           </small>
                         )}
                       </span>
@@ -1828,6 +2307,38 @@ function App() {
                 onChange={(event) => updateStop(selectedStop.id, { notes: event.currentTarget.value })}
                 rows={5}
               />
+
+              <div className="sleeping-section">
+                <label htmlFor="sleeping-arrangement">Sleeping arrangement</label>
+                <select
+                  id="sleeping-arrangement"
+                  value={selectedStop.sleepingArrangement}
+                  onChange={handleSleepingArrangementChange}
+                >
+                  <option value="camping">Camping</option>
+                  <option value="hotel">Hotel</option>
+                  <option value="friend">Staying with friend</option>
+                </select>
+
+                {selectedStop.sleepingArrangement === 'hotel' && selectedStopIndex >= 0 && (
+                  <p className="sleeping-hint">
+                    {formatSleepingArrangementSummary(selectedStop, selectedStopIndex, stops)} adds{' '}
+                    {formatCurrency(calculateStopLodgingCost(stops, selectedStopIndex))} to the trip total.
+                  </p>
+                )}
+
+                {selectedStop.sleepingArrangement === 'friend' && (
+                  <span className="friend-field">
+                    <label htmlFor="friend-name">Friend</label>
+                    <input
+                      id="friend-name"
+                      value={selectedStop.friendName}
+                      onChange={handleFriendNameChange}
+                      placeholder="Friend's name"
+                    />
+                  </span>
+                )}
+              </div>
 
               <div className="coordinate-grid">
                 <span>
@@ -2121,11 +2632,12 @@ function MapCanvas({
   onDriveEstimatesChange,
 }: MapCanvasProps) {
   const mapRef = useRef<google.maps.Map | null>(null);
-  const routePolylinesRef = useRef<google.maps.Polyline[]>([]);
   const [mapInstance, setMapInstance] = useState<google.maps.Map | null>(null);
   const [routeStatus, setRouteStatus] = useState<'idle' | 'loading' | 'ready' | 'fallback'>('idle');
   const [routeError, setRouteError] = useState('');
   const [routeNoticeDismissed, setRouteNoticeDismissed] = useState(false);
+  const [routeQuotaExhausted, setRouteQuotaExhausted] = useState(false);
+  const [routePaths, setRoutePaths] = useState<google.maps.LatLngLiteral[][]>([]);
   const [routeHotelSearchPoints, setRouteHotelSearchPoints] = useState<HotelSearchPoint[]>([]);
   const [hotelCandidates, setHotelCandidates] = useState<HotelCandidate[]>([]);
   const [hotelStatus, setHotelStatus] = useState<'idle' | 'searching' | 'ready' | 'error'>('idle');
@@ -2154,10 +2666,7 @@ function MapCanvas({
     () => hotelCandidates.find((hotel) => hotel.id === selectedHotelId) || null,
     [hotelCandidates, selectedHotelId],
   );
-  const directionsKey = useMemo(
-    () => stops.map((stop) => `${stop.id}:${stop.order}:${stop.lat.toFixed(5)},${stop.lng.toFixed(5)}`).join('|'),
-    [stops],
-  );
+  const directionsKey = useMemo(() => buildRouteCacheKey(stops), [stops]);
 
   const { isLoaded, loadError } = useLoadScript({
     googleMapsApiKey: apiKey,
@@ -2184,13 +2693,8 @@ function MapCanvas({
   }, [fitSignal]);
 
   useEffect(() => {
-    const clearRoutePolylines = () => {
-      routePolylinesRef.current.forEach((polyline) => polyline.setMap(null));
-      routePolylinesRef.current = [];
-    };
-
     if (!isLoaded || !mapInstance || stops.length < 2) {
-      clearRoutePolylines();
+      setRoutePaths([]);
       setRouteHotelSearchPoints([]);
       setRouteStatus('idle');
       setRouteError('');
@@ -2200,8 +2704,29 @@ function MapCanvas({
       return undefined;
     }
 
+    const cachedRoute = readCachedRoute(directionsKey, stops);
+    if (cachedRoute) {
+      setRoutePaths(cachedRoute.routePaths);
+      setRouteHotelSearchPoints(cachedRoute.hotelSearchPoints);
+      setRouteStatus('ready');
+      setRouteError('');
+      onRouteDistanceChange(cachedRoute.distanceMiles);
+      onDriveEstimatesChange(cachedRoute.driveEstimates);
+      return undefined;
+    }
+
+    if (routeQuotaExhausted) {
+      setRoutePaths([]);
+      setRouteHotelSearchPoints([]);
+      setRouteStatus('fallback');
+      setRouteError('Routes API daily quota reached');
+      onRouteDistanceChange(null);
+      onDriveEstimatesChange(null);
+      return undefined;
+    }
+
     let canceled = false;
-    clearRoutePolylines();
+    setRoutePaths([]);
     setRouteHotelSearchPoints([]);
     setRouteStatus('loading');
     setRouteError('');
@@ -2225,31 +2750,34 @@ function MapCanvas({
         .then((routes) => {
           if (canceled) return;
 
-          const polylines = routes.flatMap((route) =>
-            route.createPolylines({
-              polylineOptions: {
-                strokeColor: '#0f766e',
-                strokeOpacity: 0.95,
-                strokeWeight: 5,
-              },
-            }),
-          );
-          polylines.forEach((polyline) => polyline.setMap(mapInstance));
-          routePolylinesRef.current = polylines;
-          setRouteHotelSearchPoints(buildRouteHotelSearchPoints(polylines, stops));
+          const nextRoutePaths = extractRoutePaths(routes);
+          if (!nextRoutePaths.length) {
+            throw new Error('NO_ROUTE_PATH');
+          }
+
+          const nextHotelSearchPoints = buildRouteHotelSearchPoints(nextRoutePaths, stops);
+          const distanceMiles = calculateRoadRouteMiles(routes);
+          const driveEstimates = buildRoadDriveEstimates(routes, stops);
+
+          setRoutePaths(nextRoutePaths);
+          setRouteHotelSearchPoints(nextHotelSearchPoints);
           setRouteStatus('ready');
           setRouteError('');
           setRouteNoticeDismissed(false);
-          onRouteDistanceChange(calculateRoadRouteMiles(routes));
-          onDriveEstimatesChange(buildRoadDriveEstimates(routes, stops));
+          onRouteDistanceChange(distanceMiles);
+          onDriveEstimatesChange(driveEstimates);
+          writeCachedRoute(directionsKey, nextRoutePaths, distanceMiles, driveEstimates, nextHotelSearchPoints);
         })
         .catch((error: Error) => {
           if (canceled) return;
 
-          clearRoutePolylines();
+          setRoutePaths([]);
           setRouteHotelSearchPoints([]);
           setRouteStatus('fallback');
-          setRouteError(error.message);
+          setRouteError(formatRouteFallbackMessage(error));
+          if (isRouteQuotaError(error)) {
+            setRouteQuotaExhausted(true);
+          }
           setRouteNoticeDismissed(false);
           onRouteDistanceChange(null);
           onDriveEstimatesChange(null);
@@ -2259,9 +2787,8 @@ function MapCanvas({
     return () => {
       canceled = true;
       window.clearTimeout(timeoutId);
-      clearRoutePolylines();
     };
-  }, [directionsKey, isLoaded, mapInstance, onDriveEstimatesChange, onRouteDistanceChange, stops]);
+  }, [directionsKey, isLoaded, mapInstance, onDriveEstimatesChange, onRouteDistanceChange, routeQuotaExhausted, stops]);
 
   useEffect(() => {
     if (!showHotelFinder) {
@@ -2296,6 +2823,43 @@ function MapCanvas({
     const runSearch = async () => {
       const candidatesById = new Map<string, HotelCandidate>();
       let failedSearches = 0;
+      const addCandidates = (candidates: HotelCandidate[]) => {
+        candidates.forEach((candidate) => {
+          const existing = candidatesById.get(candidate.id);
+          if (!existing || candidate.score > existing.score) {
+            candidatesById.set(candidate.id, candidate);
+          }
+        });
+      };
+      const finishSearch = (messageSuffix = '') => {
+        const rankedHotels = Array.from(candidatesById.values())
+          .sort((first, second) => second.score - first.score)
+          .slice(0, maxHotelCandidates);
+        const everySearchFailed = failedSearches === hotelSearchPoints.length;
+
+        setHotelCandidates(rankedHotels);
+        setHotelStatus(everySearchFailed ? 'error' : 'ready');
+        setHotelMessage(
+          everySearchFailed
+            ? 'Hotel search is unavailable for this route.'
+            : rankedHotels.length
+            ? `${rankedHotels.length} hotel options found near the route${messageSuffix}.`
+            : 'No hotel options found near this route.',
+        );
+      };
+      const uncachedSearchPoints = hotelSearchPoints.filter((searchPoint) => {
+        const cachedCandidates = readCachedHotelCandidates(searchPoint);
+        if (!cachedCandidates) return true;
+
+        addCandidates(cachedCandidates);
+        return false;
+      });
+
+      if (!uncachedSearchPoints.length) {
+        if (!canceled) finishSearch(' from cache');
+        return;
+      }
+
       let placesLibrary: google.maps.PlacesLibrary;
 
       try {
@@ -2309,20 +2873,17 @@ function MapCanvas({
         return;
       }
 
-      for (const searchPoint of hotelSearchPoints) {
+      for (const searchPoint of uncachedSearchPoints) {
         if (canceled) return;
 
         try {
           const results = await searchHotelsNearPoint(placesLibrary, searchPoint);
-          results
+          const candidates = results
             .map((place) => normalizeHotelPlace(place, searchPoint))
-            .filter((candidate): candidate is HotelCandidate => Boolean(candidate))
-            .forEach((candidate) => {
-              const existing = candidatesById.get(candidate.id);
-              if (!existing || candidate.score > existing.score) {
-                candidatesById.set(candidate.id, candidate);
-              }
-            });
+            .filter((candidate): candidate is HotelCandidate => Boolean(candidate));
+
+          addCandidates(candidates);
+          writeCachedHotelCandidates(searchPoint, candidates);
         } catch {
           failedSearches += 1;
         }
@@ -2332,20 +2893,7 @@ function MapCanvas({
 
       if (canceled) return;
 
-      const rankedHotels = Array.from(candidatesById.values())
-        .sort((first, second) => second.score - first.score)
-        .slice(0, maxHotelCandidates);
-      const everySearchFailed = failedSearches === hotelSearchPoints.length;
-
-      setHotelCandidates(rankedHotels);
-      setHotelStatus(everySearchFailed ? 'error' : 'ready');
-      setHotelMessage(
-        everySearchFailed
-          ? 'Hotel search is unavailable for this route.'
-          : rankedHotels.length
-          ? `${rankedHotels.length} hotel options found near the route.`
-          : 'No hotel options found near this route.',
-      );
+      finishSearch(uncachedSearchPoints.length === hotelSearchPoints.length ? '' : ' with cached matches');
     };
 
     runSearch();
@@ -2394,8 +2942,6 @@ function MapCanvas({
         fitAllStops(map);
       }}
       onUnmount={() => {
-        routePolylinesRef.current.forEach((polyline) => polyline.setMap(null));
-        routePolylinesRef.current = [];
         mapRef.current = null;
         setMapInstance(null);
       }}
@@ -2409,6 +2955,19 @@ function MapCanvas({
         draggableCursor: isPlacingPin ? 'crosshair' : undefined,
       }}
     >
+      {routeStatus === 'ready' &&
+        routePaths.map((routePath, index) => (
+          <PolylineF
+            key={`route-${index}`}
+            path={routePath}
+            options={{
+              strokeColor: '#0f766e',
+              strokeOpacity: 0.95,
+              strokeWeight: 5,
+            }}
+          />
+        ))}
+
       {routeStatus === 'fallback' && path.length > 1 && (
         <PolylineF
           path={path}
@@ -2573,7 +3132,7 @@ function MapCanvas({
     )}
     {routeStatus === 'fallback' && !routeNoticeDismissed && (
       <div className="route-status warning">
-        <span>Driving route unavailable{routeError ? ` (${routeError})` : ''}; showing estimated path.</span>
+        <span>{routeError || 'Driving route unavailable'}; showing estimated path.</span>
         <button
           type="button"
           className="route-status-close"

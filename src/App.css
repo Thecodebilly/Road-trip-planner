@@ -254,6 +254,7 @@ label {
 }
 
 input,
+select,
 textarea {
   width: 100%;
   min-width: 0;
@@ -268,9 +269,14 @@ textarea {
     background 150ms ease;
 }
 
-input {
+input,
+select {
   height: 40px;
   padding: 0 0.7rem;
+}
+
+select {
+  appearance: auto;
 }
 
 textarea {
@@ -280,6 +286,7 @@ textarea {
 }
 
 input:focus,
+select:focus,
 textarea:focus {
   border-color: #0f766e;
   box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.16);
@@ -535,6 +542,14 @@ textarea:focus {
 .stop-copy .drive-summary {
   flex-wrap: wrap;
   color: #115e59;
+  font-weight: 800;
+  line-height: 1.25;
+  white-space: normal;
+}
+
+.stop-copy .lodging-summary {
+  flex-wrap: wrap;
+  color: #7a3f12;
   font-weight: 800;
   line-height: 1.25;
   white-space: normal;
@@ -1052,6 +1067,7 @@ textarea:focus {
 }
 
 .coordinate-grid,
+.sleeping-section,
 .button-grid {
   display: grid;
   gap: 0.55rem;
@@ -1065,6 +1081,20 @@ textarea:focus {
   min-width: 0;
   display: grid;
   gap: 0.35rem;
+}
+
+.friend-field {
+  min-width: 0;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.sleeping-hint {
+  margin: -0.15rem 0 0;
+  color: #7a3f12;
+  font-size: 0.8rem;
+  font-weight: 700;
+  line-height: 1.35;
 }
 
 .toggle-row {
@@ -1242,6 +1272,7 @@ code {
   }
 
   .stop-form textarea,
+  .sleeping-section,
   .toggle-row,
   .button-grid {
     grid-column: 1 / -1;

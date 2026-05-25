@@ -40,7 +40,18 @@ const routeProposalSchema = {
           items: {
             type: 'object',
             additionalProperties: false,
-            required: ['id', 'order', 'date', 'label', 'lat', 'lng', 'notes', 'remoteWork'],
+            required: [
+              'id',
+              'order',
+              'date',
+              'label',
+              'lat',
+              'lng',
+              'notes',
+              'remoteWork',
+              'sleepingArrangement',
+              'friendName',
+            ],
             properties: {
               id: { type: 'string' },
               order: { type: 'number' },
@@ -50,6 +61,8 @@ const routeProposalSchema = {
               lng: { type: 'number' },
               notes: { type: 'string' },
               remoteWork: { type: 'boolean' },
+              sleepingArrangement: { type: 'string', enum: ['camping', 'hotel', 'friend'] },
+              friendName: { type: 'string' },
             },
           },
         },
@@ -78,6 +91,10 @@ const mimeTypes = new Map([
 ]);
 
 let databaseSetupError = null;
+
+function normalizeSleepingArrangement(value) {
+  return ['camping', 'hotel', 'friend'].includes(value) ? value : 'camping';
+}
 
 const databaseReady = pool
   ? pool.query(`
@@ -151,6 +168,8 @@ function normalizeTrip(value) {
       lng: Number.isFinite(Number(stop.lng)) ? Number(stop.lng) : -98.5795,
       notes: typeof stop.notes === 'string' ? stop.notes : '',
       remoteWork: Boolean(stop.remoteWork),
+      sleepingArrangement: normalizeSleepingArrangement(stop.sleepingArrangement),
+      friendName: typeof stop.friendName === 'string' ? stop.friendName : '',
     }))
     .filter((stop) => stop.lat >= -90 && stop.lat <= 90 && stop.lng >= -180 && stop.lng <= 180)
     .sort((a, b) => a.order - b.order)
@@ -323,9 +342,10 @@ async function handleApi(request, response, url) {
           'The first and last stops are locked anchors. Keep them as the first and last stops with the same date, label, latitude, and longitude.',
           'The locked start/end date range cannot change. Keep all dated stops inside that inclusive range when both dates are known.',
           'If the user asks to change a locked start/end date or location, ignore that part and explain in the summary that those anchors stayed locked.',
-          'Preserve useful existing dates, notes, remoteWork flags, and stops unless the user asks to change them.',
+          'Preserve useful existing dates, notes, remoteWork flags, sleeping arrangements, friend names, and stops unless the user asks to change them.',
           'Use approximate latitude and longitude for well-known places when adding stops.',
-          'Every stop must have order starting at 1, a human-readable label, numeric lat/lng, notes, date, and remoteWork.',
+          'Every stop must have order starting at 1, a human-readable label, numeric lat/lng, notes, date, remoteWork, sleepingArrangement, and friendName.',
+          'sleepingArrangement must be camping, hotel, or friend. Use friendName only for friend stays and otherwise keep it as an empty string unless already useful.',
           'Keep dates as YYYY-MM-DD strings when dates are known; otherwise use an empty string.',
           'Do not save anything. This is only a proposed draft trip for the user to review.',
         ].join(' '),
