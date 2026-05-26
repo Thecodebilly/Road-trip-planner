@@ -3192,7 +3192,7 @@ function App() {
     if (!instruction) return;
 
     setIsRouteAssistantWorking(true);
-    setRouteAssistantMessage('Thinking through route changes...');
+    setRouteAssistantMessage('Thinking through route changes and driving order...');
 
     try {
       const result = await requestRouteAssistant(getActiveTripForExport(), instruction, { maxCarLegHours });

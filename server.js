@@ -589,6 +589,14 @@ function estimateRoadMiles(previous, next) {
   return Math.round(calculatePointMiles(previous, next) * 1.2);
 }
 
+function calculateTripDrivingMiles(stops) {
+  return stops.reduce((total, stop, index) => {
+    if (index === 0 || stop.travelMode !== 'car') return total;
+
+    return total + estimateRoadMiles(stops[index - 1], stop);
+  }, 0);
+}
+
 function looksLikePurposefulSplitDriveStop(stop) {
   const text = `${stop?.label || ''} ${stop?.notes || ''}`;
 
@@ -687,6 +695,11 @@ function buildDrivingPlanningContext(trip, maxOneDayCarDriveHours) {
     travelMode: 'passenger-car',
     routeBasis: 'public roads and car-accessible stops',
     targetCarLegMiles,
+    currentEstimatedCarDriveMiles: calculateTripDrivingMiles(trip.stops),
+    optimizationGoal:
+      'After satisfying the user edit, minimize total estimated car-driving miles/time for the ordered itinerary.',
+    optimizationGuardrail:
+      'Prefer the shortest practical driving order, but keep locked anchors, requested before/after/between order, fixed dates, remote-work dates, friend-stay rules, non-car legs, and daily driving limits.',
     maxOneDayCarLegMiles,
     estimatedCarAverageMph,
     maxOneDayCarDriveHours,
@@ -803,6 +816,185 @@ function enforceRouteAssistantLocks(originalTrip, proposedTrip, instruction) {
     workspaceId: originalTrip.workspaceId,
     stops,
   }) || proposedTrip;
+}
+
+function normalizeStopIdentity(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function findOriginalStopMatch(stop, originalStops) {
+  const idMatch = originalStops.find((originalStop) => originalStop.id === stop.id);
+  if (idMatch) return idMatch;
+
+  const label = normalizeStopIdentity(stop.label);
+  if (!label) return null;
+
+  return (
+    originalStops.find((originalStop) => {
+      if (normalizeStopIdentity(originalStop.label) !== label) return false;
+
+      return calculatePointMiles(originalStop, stop) <= 15;
+    }) || null
+  );
+}
+
+function instructionRequestsSpecificRouteOrder(instruction) {
+  const asksForOptimization = /\b(optimi[sz]e|minimi[sz]e|shortest|least driving|less driving|reduce driving|fewer miles)\b/i.test(
+    instruction,
+  );
+  if (asksForOptimization) return false;
+
+  return /\b(before|after|between|immediately|exact order|same order|in order|sequence)\b/i.test(instruction);
+}
+
+function getPreviousRecordDate(records, insertionIndex) {
+  for (let index = insertionIndex - 1; index >= 0; index -= 1) {
+    const date = records[index]?.stop?.date;
+    if (isDateOnly(date)) return date;
+  }
+
+  return '';
+}
+
+function getNextRecordDate(records, insertionIndex) {
+  for (let index = insertionIndex; index < records.length; index += 1) {
+    const date = records[index]?.stop?.date;
+    if (isDateOnly(date)) return date;
+  }
+
+  return '';
+}
+
+function canInsertStopByDate(records, stop, insertionIndex) {
+  if (!isDateOnly(stop.date)) return true;
+
+  const previousDate = getPreviousRecordDate(records, insertionIndex);
+  const nextDate = getNextRecordDate(records, insertionIndex);
+
+  if (previousDate && stop.date < previousDate) return false;
+  if (nextDate && stop.date > nextDate) return false;
+  return true;
+}
+
+function canInsertDrivingStop(records, stop, insertionIndex) {
+  if (insertionIndex <= 0 || insertionIndex >= records.length) return false;
+  if (stop.travelMode !== 'car') return false;
+  if (records[insertionIndex]?.stop?.travelMode !== 'car') return false;
+
+  return canInsertStopByDate(records, stop, insertionIndex);
+}
+
+function calculateDrivingInsertionAddedMiles(records, stop, insertionIndex) {
+  const previousStop = records[insertionIndex - 1].stop;
+  const nextStop = records[insertionIndex].stop;
+
+  return (
+    estimateRoadMiles(previousStop, stop) +
+    estimateRoadMiles(stop, nextStop) -
+    estimateRoadMiles(previousStop, nextStop)
+  );
+}
+
+function findBestDrivingInsertionIndex(records, stop) {
+  let best = null;
+
+  for (let insertionIndex = 1; insertionIndex < records.length; insertionIndex += 1) {
+    if (!canInsertDrivingStop(records, stop, insertionIndex)) continue;
+
+    const addedMiles = calculateDrivingInsertionAddedMiles(records, stop, insertionIndex);
+    if (!best || addedMiles < best.addedMiles) {
+      best = { insertionIndex, addedMiles };
+    }
+  }
+
+  return best?.insertionIndex || -1;
+}
+
+function findFallbackInsertionIndex(records, proposedIndex) {
+  const nextRecordIndex = records.findIndex((record) => record.proposedIndex > proposedIndex);
+  const insertionIndex = nextRecordIndex === -1 ? records.length - 1 : nextRecordIndex;
+
+  return Math.min(Math.max(insertionIndex, 1), records.length - 1);
+}
+
+function optimizeEditedDrivingStops(originalTrip, proposedTrip, instruction) {
+  const beforeMiles = calculateTripDrivingMiles(proposedTrip.stops);
+  if (proposedTrip.stops.length < 4 || instructionRequestsSpecificRouteOrder(instruction)) {
+    return {
+      trip: proposedTrip,
+      beforeMiles,
+      afterMiles: beforeMiles,
+      optimized: false,
+    };
+  }
+
+  const originalStops = originalTrip.stops;
+  const lastProposedIndex = proposedTrip.stops.length - 1;
+  const routeRecords = [];
+  const addedDrivingRecords = [];
+
+  proposedTrip.stops.forEach((stop, proposedIndex) => {
+    const isAnchor = proposedIndex === 0 || proposedIndex === lastProposedIndex;
+    const isOriginalStop = Boolean(findOriginalStopMatch(stop, originalStops));
+    const shouldKeepInPlace = isAnchor || isOriginalStop || stop.travelMode !== 'car';
+    const record = { stop, proposedIndex };
+
+    if (shouldKeepInPlace) {
+      routeRecords.push(record);
+    } else {
+      addedDrivingRecords.push(record);
+    }
+  });
+
+  if (!addedDrivingRecords.length || routeRecords.length < 2) {
+    return {
+      trip: proposedTrip,
+      beforeMiles,
+      afterMiles: beforeMiles,
+      optimized: false,
+    };
+  }
+
+  [...addedDrivingRecords]
+    .sort((first, second) => compareDateOnly(first.stop.date, second.stop.date) || first.proposedIndex - second.proposedIndex)
+    .forEach((record) => {
+      const bestInsertionIndex = findBestDrivingInsertionIndex(routeRecords, record.stop);
+      const insertionIndex =
+        bestInsertionIndex === -1 ? findFallbackInsertionIndex(routeRecords, record.proposedIndex) : bestInsertionIndex;
+
+      routeRecords.splice(insertionIndex, 0, record);
+    });
+
+  const optimizedStops = routeRecords.map((record, index) => ({
+    ...record.stop,
+    order: index + 1,
+  }));
+  const afterMiles = calculateTripDrivingMiles(optimizedStops);
+
+  if (afterMiles >= beforeMiles) {
+    return {
+      trip: proposedTrip,
+      beforeMiles,
+      afterMiles: beforeMiles,
+      optimized: false,
+    };
+  }
+
+  return {
+    trip:
+      normalizeTrip({
+        ...proposedTrip,
+        stops: optimizedStops,
+      }) || proposedTrip,
+    beforeMiles,
+    afterMiles,
+    optimized: true,
+  };
 }
 
 function getRouteAssistantTripInput(trip) {
@@ -1139,6 +1331,9 @@ async function handleApi(request, response, url) {
           'Return only the requested structured JSON.',
           'Revise the supplied trip according to the user request. You may add, remove, reorder, rename, or adjust stops.',
           'Plan the itinerary for a passenger car using public roads by default. Do not add non-car travel unless the user explicitly asks for it or the supplied trip already has a non-car leg.',
+          'After applying the requested edit, optimize the ordered stops to minimize total passenger-car driving miles and time for the full itinerary.',
+          'When adding stops, do not append them by default. Place each new stop where it adds the least practical driving, unless the user requested a specific before/after/between placement.',
+          'If the shortest driving order conflicts with a requested date, event, stop sequence, remote-work date, friend stay, non-car leg, or locked anchor, keep the requested constraint and mention the tradeoff in the summary.',
           'travelMode means how the traveler gets from the previous stop to this stop. The first stop must use travelMode=car. Use travelMode=car, plane, or boat only.',
           'For car legs, every added or reordered stop must be realistically reachable by car from the surrounding stops. Prefer stops near plausible driving corridors.',
           'For plane or boat legs, use plausible airport, ferry, or dock-adjacent destinations and mention the non-car leg in notes. The app will estimate plane/boat cost separately.',
@@ -1198,13 +1393,19 @@ async function handleApi(request, response, url) {
     }
 
     const anchoredTrip = enforceRouteAssistantLocks(trip, proposal.trip, instruction);
+    const optimizedRoute = optimizeEditedDrivingStops(trip, anchoredTrip, instruction);
     const travelSummary = instructionAllowsNonCarTravel(instruction, trip)
       ? 'Car-first planning stayed on, with requested non-car legs allowed.'
       : 'Planned for passenger-car driving.';
+    const routeOptimizationSummary = optimizedRoute.optimized
+      ? `Driving order was optimized, reducing estimated car travel by about ${Math.round(
+          optimizedRoute.beforeMiles - optimizedRoute.afterMiles,
+        ).toLocaleString()} miles.`
+      : 'Driving order was checked for a shorter route.';
 
     sendJson(response, 200, {
-      summary: `${proposal.summary} ${travelSummary} Start/end date and locations stayed locked. Remote-work dates, friend stays, and split-driving days were kept constrained.`,
-      trip: anchoredTrip,
+      summary: `${proposal.summary} ${travelSummary} ${routeOptimizationSummary} Start/end date and locations stayed locked. Remote-work dates, friend stays, and split-driving days were kept constrained.`,
+      trip: optimizedRoute.trip,
     });
     return;
   }
