@@ -1148,6 +1148,21 @@ function findSavedRouteTokenConflict(trip: Pick<Trip, 'id' | 'name'>, trips: Arr
   return trips.find((savedTrip) => savedTrip.id !== trip.id && createSavedRouteToken(savedTrip.name) === routeToken);
 }
 
+function createUniqueSavedTripName(name: string, trips: Array<Pick<Trip, 'name'>>) {
+  const baseName = name.trim() || 'Untitled trip';
+  const copyBaseName = `${baseName} copy`;
+  const usedRouteTokens = new Set(trips.map((trip) => createSavedRouteToken(trip.name)));
+  let candidate = copyBaseName;
+  let copyNumber = 2;
+
+  while (usedRouteTokens.has(createSavedRouteToken(candidate))) {
+    candidate = `${copyBaseName} ${copyNumber}`;
+    copyNumber += 1;
+  }
+
+  return candidate;
+}
+
 function extractShareIdFromToken(token: string) {
   return token.trim();
 }
@@ -3237,6 +3252,32 @@ function App() {
     }
   };
 
+  const persistSavedTrip = async (
+    tripToSave: Trip,
+    nextSavedTrips: Trip[],
+    savedAt: string,
+    messagePrefix: string,
+  ) => {
+    setActiveTrip(tripToSave);
+    setSavedTrips(nextSavedTrips);
+    setSavedRouteUrl(tripToSave, true);
+    setIsSaving(true);
+
+    try {
+      const savedTrip = await saveTripToDatabase(tripToSave);
+      setSavedTrips((trips) => mergeTripsByFreshness([savedTrip], trips));
+      setSaveBackend('database');
+      removeWorkspaceSavedTrips(activeWorkspaceId);
+      setSaveMessage(`${messagePrefix} to database ${formatDateTime(savedAt)}`);
+    } catch {
+      setSaveBackend('local');
+      writeWorkspaceSavedTrips(activeWorkspaceId, nextSavedTrips);
+      setSaveMessage(`${messagePrefix} locally ${formatDateTime(savedAt)}`);
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   const saveTrip = async () => {
     const now = new Date().toISOString();
     const tripToSave =
@@ -3253,24 +3294,37 @@ function App() {
       ...savedTrips.filter((trip) => trip.id !== tripToSave.id),
     ];
 
-    setActiveTrip(tripToSave);
-    setSavedTrips(nextSavedTrips);
-    setSavedRouteUrl(tripToSave, true);
-    setIsSaving(true);
+    await persistSavedTrip(tripToSave, nextSavedTrips, now, 'Saved');
+  };
 
-    try {
-      const savedTrip = await saveTripToDatabase(tripToSave);
-      setSavedTrips((trips) => mergeTripsByFreshness([savedTrip], trips));
-      setSaveBackend('database');
-      removeWorkspaceSavedTrips(activeWorkspaceId);
-      setSaveMessage(`Saved to database ${formatDateTime(now)}`);
-    } catch {
-      setSaveBackend('local');
-      writeWorkspaceSavedTrips(activeWorkspaceId, nextSavedTrips);
-      setSaveMessage(`Saved locally ${formatDateTime(now)}`);
-    } finally {
-      setIsSaving(false);
+  const saveAsNewTrip = async () => {
+    const now = new Date().toISOString();
+    const tripName = createUniqueSavedTripName(activeTrip.name, savedTrips);
+    const tripToSave =
+      normalizeTrip(
+        {
+          ...activeTrip,
+          id: makeId('trip'),
+          workspaceId: activeWorkspaceId,
+          name: tripName,
+          stops,
+          createdAt: now,
+          updatedAt: now,
+        },
+        activeWorkspaceId,
+      ) || activeTrip;
+    const routeTokenConflict = findSavedRouteTokenConflict(tripToSave, savedTrips);
+    if (routeTokenConflict) {
+      setSaveMessage(`Route URL #route=${createSavedRouteToken(tripToSave.name)} already exists. Rename this trip before saving.`);
+      return;
     }
+
+    const nextSavedTrips = [
+      tripToSave,
+      ...savedTrips,
+    ];
+
+    await persistSavedTrip(tripToSave, nextSavedTrips, now, 'Saved as new trip');
   };
 
   const exportActiveTrip = () => {
@@ -3732,6 +3786,16 @@ function App() {
                 aria-label="Export active trip"
               >
                 <Download size={18} />
+              </button>
+              <button
+                type="button"
+                className="secondary-button topbar-save-as"
+                onClick={saveAsNewTrip}
+                title="Save as new trip"
+                disabled={isSaving}
+              >
+                <Copy size={18} />
+                <span>Save as new</span>
               </button>
               <button type="button" className="primary-button" onClick={saveTrip} disabled={isSaving}>
                 <Save size={18} />

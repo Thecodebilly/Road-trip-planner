@@ -234,6 +234,11 @@ button {
   white-space: nowrap;
 }
 
+.topbar-save-as {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
 .file-input {
   display: none;
 }
