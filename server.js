@@ -13,11 +13,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const distDir = path.join(__dirname, 'dist');
 const dataDir = path.join(__dirname, '.data');
 const sharedTripsFile = path.join(dataDir, 'shared-trips.json');
+const openaiReasoningEffortOptions = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'];
 const port = Number(process.env.PORT) || 3000;
 const databaseUrl = process.env.DATABASE_URL;
 const openaiToken = process.env.OPENAI_TOKEN || process.env.OPENAI_API_KEY;
-const openaiModel = process.env.OPENAI_MODEL || 'gpt-5-mini';
-const openaiTripStarterModel = process.env.OPENAI_TRIP_STARTER_MODEL || 'gpt-5';
+const openaiModel = process.env.OPENAI_MODEL || 'gpt-5.5';
+const openaiTripStarterModel = process.env.OPENAI_TRIP_STARTER_MODEL || openaiModel;
+const openaiReasoningEffort = normalizeOpenAIReasoningEffort(process.env.OPENAI_REASONING_EFFORT || 'high');
 const maxBodyBytes = 8 * 1024 * 1024;
 const maxRouteAssistantInstructionChars = 12000;
 const aiRequestCooldownMs = 30 * 1000;
@@ -116,6 +118,13 @@ function normalizeSleepingArrangement(value) {
 
 function normalizeTravelMode(value) {
   return travelModeOptions.includes(value) ? value : 'car';
+}
+
+function normalizeOpenAIReasoningEffort(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized || normalized === 'default' || normalized === 'auto' || normalized === 'off') return '';
+
+  return openaiReasoningEffortOptions.includes(normalized) ? normalized : 'high';
 }
 
 function normalizeMaxCarLegHours(value) {
@@ -653,6 +662,38 @@ function instructionAllowsNonCarTravel(instruction, trip) {
   return /\b(non[-\s]?car|plane|flight|fly|flying|airport|boat|ferry|ship|sail|train|rail)\b/i.test(instruction);
 }
 
+function instructionRequestsFullTripRework(instruction) {
+  return /\b(?:redo\w*|re-do\w*|rework\w*|re-work\w*|replan\w*|re-plan\w*|rebuild\w*|re-build\w*|rerout\w*|re-rout\w*|redesign\w*|re-design\w*|rethink\w*|revamp\w*|start over|from scratch|fresh(?: route| plan| itinerary)|whole trip|entire trip|full trip)\b/i.test(
+    instruction,
+  );
+}
+
+function instructionRequestsRouteEfficiency(instruction) {
+  return /\b(optimi[sz]\w*|efficient|efficiency|shortest|shorter|least driving|less driving|reduce driving|reduce miles|fewer miles|minimi[sz]\w*|backtrack\w*|zigzag\w*)\b/i.test(
+    instruction,
+  );
+}
+
+function buildRouteRevisionScope(instruction) {
+  const fullTripRework = instructionRequestsFullTripRework(instruction);
+  const wholeRouteOptimization = fullTripRework || instructionRequestsRouteEfficiency(instruction);
+
+  return {
+    mode: fullTripRework
+      ? 'full-trip-rework'
+      : wholeRouteOptimization
+        ? 'whole-route-optimization'
+        : 'targeted-edit',
+    reconsiderWholeTrip: fullTripRework,
+    optimizeWholeRoute: wholeRouteOptimization,
+    guidance: fullTripRework
+      ? 'Treat this as permission to rethink the entire middle itinerary, not just the named stops. Keep only the locked anchors and hard constraints.'
+      : wholeRouteOptimization
+        ? 'Treat route efficiency as a primary goal for all unlocked middle car stops, not only newly added stops.'
+        : 'Apply the requested edit while still checking the whole route for unnecessary added driving.',
+  };
+}
+
 function enforceTravelModeRules(originalTrip, proposedStops, instruction) {
   const allowNonCarTravel = instructionAllowsNonCarTravel(instruction, originalTrip);
 
@@ -666,7 +707,7 @@ function enforceTravelModeRules(originalTrip, proposedStops, instruction) {
   });
 }
 
-function buildDrivingPlanningContext(trip, maxOneDayCarDriveHours) {
+function buildDrivingPlanningContext(trip, maxOneDayCarDriveHours, revisionScope = null) {
   const maxOneDayCarLegMiles = Math.round(maxOneDayCarDriveHours * estimatedCarAverageMph);
   const currentLegs = trip.stops.slice(1).map((stop, index) => {
     const previous = trip.stops[index];
@@ -697,9 +738,17 @@ function buildDrivingPlanningContext(trip, maxOneDayCarDriveHours) {
     targetCarLegMiles,
     currentEstimatedCarDriveMiles: calculateTripDrivingMiles(trip.stops),
     optimizationGoal:
-      'After satisfying the user edit, minimize total estimated car-driving miles/time for the ordered itinerary.',
+      revisionScope?.optimizeWholeRoute
+        ? 'Minimize total estimated car-driving miles/time across the whole unlocked itinerary, not only around edited stops.'
+        : 'After satisfying the user edit, minimize total estimated car-driving miles/time for the ordered itinerary.',
     optimizationGuardrail:
       'Prefer the shortest practical driving order, but keep locked anchors, requested before/after/between order, fixed dates, remote-work dates, friend-stay rules, non-car legs, and daily driving limits.',
+    routeEfficiencyChecklist: [
+      'Compare each stop against nearby alternatives or placements before finalizing.',
+      'Avoid zigzags, long backtracking legs, and scenic detours unless the user asked for them.',
+      'Prefer corridors that keep the next two or three driving legs efficient, not only the immediate leg.',
+    ],
+    revisionScope,
     maxOneDayCarLegMiles,
     estimatedCarAverageMph,
     maxOneDayCarDriveHours,
@@ -844,9 +893,8 @@ function findOriginalStopMatch(stop, originalStops) {
 }
 
 function instructionRequestsSpecificRouteOrder(instruction) {
-  const asksForOptimization = /\b(optimi[sz]e|minimi[sz]e|shortest|least driving|less driving|reduce driving|fewer miles)\b/i.test(
-    instruction,
-  );
+  const asksForOptimization =
+    instructionRequestsFullTripRework(instruction) || instructionRequestsRouteEfficiency(instruction);
   if (asksForOptimization) return false;
 
   return /\b(before|after|between|immediately|exact order|same order|in order|sequence)\b/i.test(instruction);
@@ -924,6 +972,9 @@ function findFallbackInsertionIndex(records, proposedIndex) {
 
 function optimizeEditedDrivingStops(originalTrip, proposedTrip, instruction) {
   const beforeMiles = calculateTripDrivingMiles(proposedTrip.stops);
+  const optimizeWholeRoute =
+    instructionRequestsFullTripRework(instruction) || instructionRequestsRouteEfficiency(instruction);
+
   if (proposedTrip.stops.length < 4 || instructionRequestsSpecificRouteOrder(instruction)) {
     return {
       trip: proposedTrip,
@@ -936,22 +987,22 @@ function optimizeEditedDrivingStops(originalTrip, proposedTrip, instruction) {
   const originalStops = originalTrip.stops;
   const lastProposedIndex = proposedTrip.stops.length - 1;
   const routeRecords = [];
-  const addedDrivingRecords = [];
+  const movableDrivingRecords = [];
 
   proposedTrip.stops.forEach((stop, proposedIndex) => {
     const isAnchor = proposedIndex === 0 || proposedIndex === lastProposedIndex;
     const isOriginalStop = Boolean(findOriginalStopMatch(stop, originalStops));
-    const shouldKeepInPlace = isAnchor || isOriginalStop || stop.travelMode !== 'car';
+    const shouldKeepInPlace = isAnchor || stop.travelMode !== 'car' || (!optimizeWholeRoute && isOriginalStop);
     const record = { stop, proposedIndex };
 
     if (shouldKeepInPlace) {
       routeRecords.push(record);
     } else {
-      addedDrivingRecords.push(record);
+      movableDrivingRecords.push(record);
     }
   });
 
-  if (!addedDrivingRecords.length || routeRecords.length < 2) {
+  if (!movableDrivingRecords.length || routeRecords.length < 2) {
     return {
       trip: proposedTrip,
       beforeMiles,
@@ -960,7 +1011,7 @@ function optimizeEditedDrivingStops(originalTrip, proposedTrip, instruction) {
     };
   }
 
-  [...addedDrivingRecords]
+  [...movableDrivingRecords]
     .sort((first, second) => compareDateOnly(first.stop.date, second.stop.date) || first.proposedIndex - second.proposedIndex)
     .forEach((record) => {
       const bestInsertionIndex = findBestDrivingInsertionIndex(routeRecords, record.stop);
@@ -1196,6 +1247,13 @@ function checkAiRequestRateLimit(response, error = 'AI_RATE_LIMITED') {
   return true;
 }
 
+function buildOpenAIResponseBody(payload) {
+  return {
+    ...payload,
+    ...(openaiReasoningEffort ? { reasoning: { effort: openaiReasoningEffort } } : {}),
+  };
+}
+
 async function handleApi(request, response, url) {
   if (request.method === 'POST' && url.pathname === '/api/trip-starter') {
     if (!openaiToken) {
@@ -1226,13 +1284,14 @@ async function handleApi(request, response, url) {
         authorization: `Bearer ${openaiToken}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({
+      body: JSON.stringify(buildOpenAIResponseBody({
         model: openaiTripStarterModel,
         instructions: [
           'You are a road-trip planner creating the first draft of a new trip from a long user prompt.',
           'Return only the requested structured JSON.',
           'Generate a complete but editable itinerary with a useful trip name, concise notes, and ordered stops.',
           'Plan for a passenger car using public roads by default. Do not add non-car travel unless the user explicitly asks for it.',
+          'Optimize the first draft as a whole route: avoid zigzags, long backtracking legs, and stop placements that make later driving legs inefficient.',
           'travelMode means how the traveler gets from the previous stop to this stop. The first stop must use travelMode=car. Use travelMode=car, plane, or boat only.',
           'For car legs, every stop must be realistically reachable by car from the previous stop in one day. Prefer stops near plausible driving corridors.',
           'For plane or boat legs, use plausible airport, ferry, or dock-adjacent destinations and mention the non-car leg in notes. The app will estimate plane/boat cost separately.',
@@ -1265,7 +1324,7 @@ async function handleApi(request, response, url) {
             schema: routeProposalSchema,
           },
         },
-      }),
+      })),
     });
 
     if (!openaiResponse.ok) {
@@ -1316,7 +1375,8 @@ async function handleApi(request, response, url) {
 
     const lockedAnchors = buildRouteAssistantLocks(trip);
     const maxOneDayCarDriveHours = normalizeMaxCarLegHours(body.settings?.maxCarLegHours);
-    const drivingPlanningContext = buildDrivingPlanningContext(trip, maxOneDayCarDriveHours);
+    const revisionScope = buildRouteRevisionScope(instruction);
+    const drivingPlanningContext = buildDrivingPlanningContext(trip, maxOneDayCarDriveHours, revisionScope);
 
     const openaiResponse = await fetch('https://api.openai.com/v1/responses', {
       method: 'POST',
@@ -1324,15 +1384,17 @@ async function handleApi(request, response, url) {
         authorization: `Bearer ${openaiToken}`,
         'content-type': 'application/json',
       },
-      body: JSON.stringify({
+      body: JSON.stringify(buildOpenAIResponseBody({
         model: openaiModel,
         instructions: [
           'You are a route-planning assistant for a road-trip planner.',
           'Return only the requested structured JSON.',
           'Revise the supplied trip according to the user request. You may add, remove, reorder, rename, or adjust stops.',
+          'If the request says to redo, rework, replan, rebuild, reroute, start over, make a fresh plan, or otherwise rethink the trip, treat it as a full-trip rework. Reconsider every unlocked middle stop, date, and driving leg instead of making a narrow local patch.',
           'Plan the itinerary for a passenger car using public roads by default. Do not add non-car travel unless the user explicitly asks for it or the supplied trip already has a non-car leg.',
-          'After applying the requested edit, optimize the ordered stops to minimize total passenger-car driving miles and time for the full itinerary.',
-          'When adding stops, do not append them by default. Place each new stop where it adds the least practical driving, unless the user requested a specific before/after/between placement.',
+          'After applying the requested edit, optimize the ordered stops to minimize total passenger-car driving miles and time for the full itinerary, including stops the user did not explicitly name when they affect route efficiency.',
+          'Evaluate route efficiency at the whole-trip level before finalizing: avoid zigzags, long backtracking legs, and placements that look efficient locally but make the next legs worse.',
+          'When adding stops, do not append them by default. Compare multiple placements and choose where each stop adds the least practical driving, unless the user requested a specific before/after/between placement.',
           'If the shortest driving order conflicts with a requested date, event, stop sequence, remote-work date, friend stay, non-car leg, or locked anchor, keep the requested constraint and mention the tradeoff in the summary.',
           'travelMode means how the traveler gets from the previous stop to this stop. The first stop must use travelMode=car. Use travelMode=car, plane, or boat only.',
           'For car legs, every added or reordered stop must be realistically reachable by car from the surrounding stops. Prefer stops near plausible driving corridors.',
@@ -1348,7 +1410,8 @@ async function handleApi(request, response, url) {
           'The locked start/end date range cannot change. Keep all dated stops inside that inclusive range when both dates are known.',
           'If the user asks to change a locked start/end date or location, ignore that part and explain in the summary that those anchors stayed locked.',
           'Remote-work dates are locked. Keep the exact same calendar dates marked remoteWork=true as the input trip, do not add new remoteWork dates, and do not remove existing remoteWork dates.',
-          'Preserve useful existing dates, notes, sleeping arrangements, friend names, and stops unless the user asks to change them.',
+          'For targeted edits, preserve useful existing dates, notes, sleeping arrangements, friend names, and stops unless the user asks to change them.',
+          'For full-trip reworks or route-efficiency requests, do not preserve middle stops or their order just because they already exist. Keep only stops that still make sense after optimizing the whole unlocked route.',
           'Use approximate latitude and longitude for well-known places when adding stops.',
           'Every stop must have order starting at 1, a human-readable label, numeric lat/lng, notes, date, remoteWork, sleepingArrangement, friendName, and travelMode.',
           'sleepingArrangement must be camping, hotel, or friend. Never invent a friend stay or friendName.',
@@ -1359,6 +1422,7 @@ async function handleApi(request, response, url) {
         ].join(' '),
         input: JSON.stringify({
           instruction,
+          revisionScope,
           lockedAnchors,
           drivingPlanningContext,
           trip: getRouteAssistantTripInput(trip),
@@ -1372,7 +1436,7 @@ async function handleApi(request, response, url) {
             schema: routeProposalSchema,
           },
         },
-      }),
+      })),
     });
 
     if (!openaiResponse.ok) {
@@ -1401,7 +1465,9 @@ async function handleApi(request, response, url) {
       ? `Driving order was optimized, reducing estimated car travel by about ${Math.round(
           optimizedRoute.beforeMiles - optimizedRoute.afterMiles,
         ).toLocaleString()} miles.`
-      : 'Driving order was checked for a shorter route.';
+      : revisionScope.optimizeWholeRoute
+        ? 'The whole unlocked route was checked for a shorter driving order.'
+        : 'Driving order was checked for a shorter route.';
 
     sendJson(response, 200, {
       summary: `${proposal.summary} ${travelSummary} ${routeOptimizationSummary} Start/end date and locations stayed locked. Remote-work dates, friend stays, and split-driving days were kept constrained.`,
