@@ -1035,6 +1035,15 @@ textarea:focus {
   height: 42px;
 }
 
+.ai-settings-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.ai-settings-actions .primary-button {
+  min-width: 130px;
+}
+
 .ai-model-list {
   max-height: 420px;
   display: grid;

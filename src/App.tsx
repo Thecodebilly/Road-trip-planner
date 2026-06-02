@@ -1331,17 +1331,6 @@ function getInitialAppView(): AppView {
   return isAiSettingsPath() ? 'ai' : 'editor';
 }
 
-function setAiSettingsUrl(replace = false) {
-  const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
-  if (currentUrl === aiSettingsPath) return;
-
-  if (replace) {
-    window.history.replaceState(null, '', aiSettingsPath);
-  } else {
-    window.history.pushState(null, '', aiSettingsPath);
-  }
-}
-
 function clearAiSettingsUrl(replace = false) {
   if (!isAiSettingsPath()) return;
 
@@ -2664,6 +2653,7 @@ function App() {
   const [routeAssistantContextMessages, setRouteAssistantContextMessages] = useState<RouteAssistantContextMessage[]>([]);
   const [isRouteAssistantWorking, setIsRouteAssistantWorking] = useState(false);
   const [aiModelSettings, setAiModelSettings] = useState<AiModelSettings>(() => readAiModelSettings());
+  const [aiModelDraft, setAiModelDraft] = useState<AiModelSettings>(() => readAiModelSettings());
   const [aiSettingsMessage, setAiSettingsMessage] = useState('');
   const [openAIModels, setOpenAIModels] = useState<OpenAIModelOption[]>([]);
   const [isLoadingOpenAIModels, setIsLoadingOpenAIModels] = useState(false);
@@ -3727,26 +3717,31 @@ function App() {
     setCurrentView('saved');
   };
 
-  const openAiSettings = () => {
-    clearSavedRouteUrl();
-    setAiSettingsUrl();
-    setCurrentView('ai');
+  const updateAiModelDraft = (field: keyof AiModelSettings, value: string) => {
+    setAiModelDraft((settings) => normalizeAiModelSettings({ ...settings, [field]: value }));
+    setAiSettingsMessage('Ready to submit');
   };
 
-  const updateAiModelSetting = (field: keyof AiModelSettings, value: string) => {
-    setAiModelSettings((settings) => {
-      const nextSettings = normalizeAiModelSettings({ ...settings, [field]: value });
-      writeAiModelSettings(nextSettings);
-      return nextSettings;
-    });
-    setAiSettingsMessage('AI model settings saved');
+  const submitAiModelSettings = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const nextSettings = normalizeAiModelSettings(aiModelDraft);
+    setAiModelSettings(nextSettings);
+    setAiModelDraft(nextSettings);
+    writeAiModelSettings(nextSettings);
+    setAiSettingsMessage('AI model settings submitted');
   };
 
   const resetAiModelSettings = () => {
     const nextSettings = createEmptyAiModelSettings();
     setAiModelSettings(nextSettings);
+    setAiModelDraft(nextSettings);
     writeAiModelSettings(nextSettings);
     setAiSettingsMessage('AI model settings reset');
+  };
+
+  const pickAiModelDraft = (field: keyof AiModelSettings, model: string) => {
+    setAiModelDraft((settings) => normalizeAiModelSettings({ ...settings, [field]: model }));
+    setAiSettingsMessage('Ready to submit');
   };
 
   const loadOpenAIModels = async () => {
@@ -3938,13 +3933,6 @@ function App() {
           >
             Saved trips
             <span>{savedTrips.length}</span>
-          </button>
-          <button
-            type="button"
-            className={currentView === 'ai' ? 'view-tab active' : 'view-tab'}
-            onClick={openAiSettings}
-          >
-            AI
           </button>
         </nav>
 
@@ -4788,7 +4776,7 @@ function App() {
             </div>
           </section>
 
-          <section className="ai-settings-panel">
+          <form className="ai-settings-panel" onSubmit={submitAiModelSettings}>
             <div className="section-heading">
               <h2>Models</h2>
               <span>{aiModelSettings.routeAssistantModel || aiModelSettings.tripStarterModel ? 'Custom' : 'Default'}</span>
@@ -4800,8 +4788,8 @@ function App() {
                   id="ai-route-model"
                   list="ai-model-options"
                   type="text"
-                  value={aiModelSettings.routeAssistantModel}
-                  onChange={(event) => updateAiModelSetting('routeAssistantModel', event.currentTarget.value)}
+                  value={aiModelDraft.routeAssistantModel}
+                  onChange={(event) => updateAiModelDraft('routeAssistantModel', event.currentTarget.value)}
                   placeholder="server default"
                   autoCapitalize="none"
                   autoCorrect="off"
@@ -4815,8 +4803,8 @@ function App() {
                   id="ai-trip-model"
                   list="ai-model-options"
                   type="text"
-                  value={aiModelSettings.tripStarterModel}
-                  onChange={(event) => updateAiModelSetting('tripStarterModel', event.currentTarget.value)}
+                  value={aiModelDraft.tripStarterModel}
+                  onChange={(event) => updateAiModelDraft('tripStarterModel', event.currentTarget.value)}
                   placeholder="server default"
                   autoCapitalize="none"
                   autoCorrect="off"
@@ -4830,7 +4818,13 @@ function App() {
                 <option key={model.id} value={model.id} />
               ))}
             </datalist>
-          </section>
+            <footer className="ai-settings-actions">
+              <button type="submit" className="primary-button">
+                <Save size={17} />
+                <span>Submit</span>
+              </button>
+            </footer>
+          </form>
 
           <section className="ai-settings-panel">
             <div className="section-heading">
@@ -4849,18 +4843,18 @@ function App() {
                       <button
                         type="button"
                         className="icon-button ghost"
-                        onClick={() => updateAiModelSetting('routeAssistantModel', model.id)}
-                        title={`Use ${model.id} for route editor`}
-                        aria-label={`Use ${model.id} for route editor`}
+                        onClick={() => pickAiModelDraft('routeAssistantModel', model.id)}
+                        title={`Select ${model.id} for route editor`}
+                        aria-label={`Select ${model.id} for route editor`}
                       >
                         <Route size={16} />
                       </button>
                       <button
                         type="button"
                         className="icon-button ghost"
-                        onClick={() => updateAiModelSetting('tripStarterModel', model.id)}
-                        title={`Use ${model.id} for new-trip generator`}
-                        aria-label={`Use ${model.id} for new-trip generator`}
+                        onClick={() => pickAiModelDraft('tripStarterModel', model.id)}
+                        title={`Select ${model.id} for new-trip generator`}
+                        aria-label={`Select ${model.id} for new-trip generator`}
                       >
                         <FilePlus2 size={16} />
                       </button>

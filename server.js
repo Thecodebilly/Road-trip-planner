@@ -18,8 +18,8 @@ const port = Number(process.env.PORT) || 3000;
 const databaseUrl = process.env.DATABASE_URL;
 const openaiToken = process.env.OPENAI_TOKEN || process.env.OPENAI_API_KEY;
 const openaiModel = process.env.OPENAI_MODEL || 'gpt-5';
-const openaiTripStarterModel = process.env.OPENAI_TRIP_STARTER_MODEL || openaiModel;
-const openaiReasoningEffort = normalizeOpenAIReasoningEffort(process.env.OPENAI_REASONING_EFFORT || 'high');
+const openaiTripStarterModel = process.env.OPENAI_TRIP_STARTER_MODEL || 'gpt-5-mini';
+const openaiReasoningEffort = normalizeOpenAIReasoningEffort(process.env.OPENAI_REASONING_EFFORT || 'low');
 const maxBodyBytes = 8 * 1024 * 1024;
 const maxRouteAssistantInstructionChars = 12000;
 const maxRouteAssistantContextMessages = 5;
@@ -1385,7 +1385,7 @@ async function handleApi(request, response, url) {
           instruction,
           drivingPlanningContext: buildDrivingPlanningContext(baseTrip, maxOneDayCarDriveHours),
         }),
-        max_output_tokens: 18000,
+        max_output_tokens: 10000,
         text: {
           format: {
             type: 'json_schema',

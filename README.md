@@ -24,8 +24,8 @@ A small React + TypeScript + Vite web app that visualizes a USA road trip itiner
    ```env
    OPENAI_TOKEN=your_openai_api_token_here
    OPENAI_MODEL=gpt-5
-   OPENAI_TRIP_STARTER_MODEL=gpt-5
-   OPENAI_REASONING_EFFORT=high
+   OPENAI_TRIP_STARTER_MODEL=gpt-5-mini
+   OPENAI_REASONING_EFFORT=low
    ```
 6. Start the frontend dev server:
    ```bash
@@ -46,8 +46,8 @@ npm start
    - `DATABASE_URL` from a Railway Postgres database, or another Postgres provider.
    - `OPENAI_TOKEN` for the AI route editor.
    - `OPENAI_MODEL` if you want to override the default `gpt-5`.
-   - `OPENAI_TRIP_STARTER_MODEL` if you want the new-trip generator to use a different model.
-   - `OPENAI_REASONING_EFFORT` if you want to override the default `high` reasoning effort.
+   - `OPENAI_TRIP_STARTER_MODEL` if you want to override the default `gpt-5-mini`.
+   - `OPENAI_REASONING_EFFORT` if you want to override the default `low` reasoning effort.
 3. Railway will build and run using:
    - Build: `npm run build`
    - Start: `npm run start`
