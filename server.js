@@ -44,11 +44,15 @@ const routeProposalSchema = {
     trip: {
       type: 'object',
       additionalProperties: false,
-      required: ['id', 'name', 'notes', 'createdAt', 'updatedAt', 'stops'],
+      required: ['id', 'name', 'notes', 'remoteWorkDates', 'createdAt', 'updatedAt', 'stops'],
       properties: {
         id: { type: 'string' },
         name: { type: 'string' },
         notes: { type: 'string' },
+        remoteWorkDates: {
+          type: 'array',
+          items: { type: 'string' },
+        },
         createdAt: { type: 'string' },
         updatedAt: { type: 'string' },
         stops: {
@@ -260,7 +264,7 @@ function normalizeTrip(value) {
   if (!isTrip(value)) return null;
 
   const now = new Date().toISOString();
-  const stops = value.stops
+  const rawStops = value.stops
     .filter((stop) => stop && typeof stop === 'object' && typeof stop.label === 'string')
     .map((stop, index) => ({
       id: typeof stop.id === 'string' && stop.id ? stop.id : `stop-${index + 1}`,
@@ -278,6 +282,12 @@ function normalizeTrip(value) {
     .filter((stop) => stop.lat >= -90 && stop.lat <= 90 && stop.lng >= -180 && stop.lng <= 180)
     .sort((a, b) => a.order - b.order)
     .map((stop, index) => ({ ...stop, order: index + 1 }));
+  const remoteWorkDates = normalizeRemoteWorkDates(value.remoteWorkDates, rawStops);
+  const remoteWorkDateSet = new Set(remoteWorkDates);
+  const stops = rawStops.map((stop) => ({
+    ...stop,
+    remoteWork: isDateOnly(stop.date) && remoteWorkDateSet.has(stop.date),
+  }));
 
   if (!stops.length) return null;
   const stopIds = new Set(stops.map((stop) => stop.id));
@@ -295,6 +305,7 @@ function normalizeTrip(value) {
         : defaultWorkspaceId,
     name: value.name.trim() || 'Untitled trip',
     notes: typeof value.notes === 'string' ? value.notes : '',
+    remoteWorkDates,
     stops,
     documents,
     createdAt: typeof value.createdAt === 'string' ? value.createdAt : now,
@@ -425,33 +436,52 @@ async function databaseShareSlugExists(id) {
   return Boolean(result.rowCount);
 }
 
-async function saveSharedTripExport(exportedTrip) {
-  const useDatabase = await canUseDatabase();
-  const id = createShareSlug(exportedTrip.trip?.name);
-  const exists = useDatabase ? await databaseShareSlugExists(id) : await fileShareSlugExists(id);
+async function shareSlugExists(id, useDatabase) {
+  return useDatabase ? databaseShareSlugExists(id) : fileShareSlugExists(id);
+}
 
-  if (exists) {
-    throw createDuplicateShareSlugError(id);
-  }
+async function createUniqueShareSlug(value, useDatabase) {
+  const baseId = createShareSlug(value);
+  let id = baseId;
 
-  if (useDatabase) {
-    try {
-      await pool.query(
-        `
-          INSERT INTO shared_trips (id, export)
-          VALUES ($1, $2::jsonb)
-        `,
-        [id, JSON.stringify(exportedTrip)],
-      );
-    } catch (error) {
-      if (error?.code === '23505') {
-        throw createDuplicateShareSlugError(id);
-      }
-
-      throw error;
+  for (let suffix = 1; suffix <= 500; suffix += 1) {
+    if (!(await shareSlugExists(id, useDatabase))) {
+      return id;
     }
 
-    return { id, durable: true };
+    id = `${baseId}-${suffix + 1}`;
+  }
+
+  return `${baseId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+}
+
+async function saveSharedTripExport(exportedTrip) {
+  const useDatabase = await canUseDatabase();
+  let id = await createUniqueShareSlug(exportedTrip.trip?.name, useDatabase);
+
+  if (useDatabase) {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      try {
+        await pool.query(
+          `
+            INSERT INTO shared_trips (id, export)
+            VALUES ($1, $2::jsonb)
+          `,
+          [id, JSON.stringify(exportedTrip)],
+        );
+
+        return { id, durable: true };
+      } catch (error) {
+        if (error?.code === '23505') {
+          id = await createUniqueShareSlug(exportedTrip.trip?.name, useDatabase);
+          continue;
+        }
+
+        throw error;
+      }
+    }
+
+    throw createDuplicateShareSlugError(id);
   }
 
   await loadFileSharedTrips();
@@ -485,6 +515,26 @@ async function readSharedTripExport(id) {
 
 function isDateOnly(value) {
   return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function normalizeRemoteWorkDates(value, stops = []) {
+  const remoteWorkDates = new Set();
+
+  if (Array.isArray(value)) {
+    value.forEach((date) => {
+      if (isDateOnly(date)) {
+        remoteWorkDates.add(date);
+      }
+    });
+  }
+
+  stops.forEach((stop) => {
+    if (stop?.remoteWork && isDateOnly(stop.date)) {
+      remoteWorkDates.add(stop.date);
+    }
+  });
+
+  return Array.from(remoteWorkDates).sort();
 }
 
 function clampDateToRange(date, startDate, endDate) {
@@ -521,7 +571,7 @@ function getRemoteWorkStops(trip) {
 }
 
 function getRemoteWorkDates(trip) {
-  return new Set(getRemoteWorkStops(trip).map((stop) => stop.date));
+  return new Set(normalizeRemoteWorkDates(trip.remoteWorkDates, trip.stops));
 }
 
 function compareDateOnly(first, second) {
@@ -887,6 +937,7 @@ function enforceRouteAssistantLocks(originalTrip, proposedTrip, instruction) {
   return normalizeTrip({
     ...proposedTrip,
     workspaceId: originalTrip.workspaceId,
+    remoteWorkDates: Array.from(getRemoteWorkDates(originalTrip)).sort(),
     stops,
   }) || proposedTrip;
 }
@@ -1079,6 +1130,7 @@ function getRouteAssistantTripInput(trip) {
     workspaceId: trip.workspaceId,
     name: trip.name,
     notes: trip.notes,
+    remoteWorkDates: Array.from(getRemoteWorkDates(trip)).sort(),
     createdAt: trip.createdAt,
     updatedAt: trip.updatedAt,
     stops: trip.stops,
@@ -1372,7 +1424,7 @@ async function handleApi(request, response, url) {
           `Two car-driving sessions on one date are allowed only when the middle stop is a real event, reservation, meetup, scenic stop, attraction, meal, or rest break, the middle stop notes explain that purpose, and total same-date car driving stays within ${maxOneDayCarDriveHours} hours.`,
           'Do not invent fake events solely to justify split driving. If a day would need multiple normal driving shifts, move one stop to another date or add an overnight stop instead.',
           'Do not create three or more car-driving sessions on one date. Avoid adding split-drive sessions on remote-work dates.',
-          'Use remoteWork=true only for dates the user explicitly describes as remote-work days; otherwise use remoteWork=false.',
+          'Return trip.remoteWorkDates as the sorted YYYY-MM-DD dates the user explicitly describes as remote-work days. Use remoteWork=true only on stops whose date is in remoteWorkDates; otherwise use remoteWork=false.',
           'Use approximate latitude and longitude for well-known places when adding stops.',
           'Every stop must have order starting at 1, a human-readable label, numeric lat/lng, notes, date, remoteWork, sleepingArrangement, friendName, and travelMode.',
           'sleepingArrangement must be camping, hotel, or friend. Default new stops to camping unless the user explicitly asks for hotel.',
@@ -1485,6 +1537,7 @@ async function handleApi(request, response, url) {
           'Remote-work dates are locked, but the stops on those dates are not locked. Keep the exact same calendar dates marked remoteWork=true as the input trip.',
           'You may edit, rename, move, reorder, replace, add, or remove stops around remote-work dates, but do not move the remoteWork=true marker to a different date.',
           'Do not add new remoteWork dates or remove existing remoteWork dates. If the user asks to change the remote-work calendar dates, ignore that part and explain in the summary that remote-work dates stayed locked.',
+          'Return trip.remoteWorkDates as the exact same sorted YYYY-MM-DD array from the input trip.',
           'For targeted edits, preserve useful existing dates, notes, sleeping arrangements, friend names, and stops unless the user asks to change them.',
           'For full-trip reworks or route-efficiency requests, do not preserve unlocked middle stops or their order just because they already exist. Keep only unlocked stops that still make sense after optimizing the whole route.',
           'Use approximate latitude and longitude for well-known places when adding stops.',

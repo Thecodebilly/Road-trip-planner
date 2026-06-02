@@ -27,6 +27,16 @@ button {
   color: inherit;
 }
 
+.loading-icon {
+  animation: loading-spin 0.85s linear infinite;
+}
+
+@keyframes loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 #root {
   min-height: 100vh;
 }
@@ -369,6 +379,118 @@ textarea:focus {
   min-width: 0;
   display: grid;
   gap: 0.3rem;
+}
+
+.remote-work-calendar {
+  display: grid;
+  gap: 0.55rem;
+  padding-top: 0.1rem;
+}
+
+.remote-calendar-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.55rem;
+  color: #17202a;
+}
+
+.remote-calendar-title span {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.remote-calendar-title strong {
+  font-size: 0.88rem;
+}
+
+.remote-calendar-title small {
+  color: #667085;
+  font-size: 0.76rem;
+  white-space: nowrap;
+}
+
+.remote-calendar-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  gap: 0.32rem;
+}
+
+.remote-calendar-weekday {
+  min-width: 0;
+  color: #667085;
+  font-size: 0.66rem;
+  font-weight: 700;
+  line-height: 1;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+.remote-calendar-blank {
+  min-height: 34px;
+}
+
+.remote-calendar-day {
+  position: relative;
+  min-width: 0;
+  min-height: 38px;
+  display: grid;
+  place-items: center;
+  gap: 0.04rem;
+  padding: 0.18rem;
+  border: 1px solid #d8e1ea;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #17202a;
+  font-size: 0.8rem;
+  font-weight: 750;
+}
+
+.remote-calendar-day:hover {
+  border-color: #0f766e;
+  box-shadow: 0 5px 14px rgba(15, 118, 110, 0.12);
+}
+
+.remote-calendar-day small {
+  min-width: 14px;
+  height: 14px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  background: #e7edf3;
+  color: #344054;
+  font-size: 0.62rem;
+  line-height: 1;
+}
+
+.remote-calendar-day.weekend {
+  background: #fff8d8;
+  border-color: #ead278;
+}
+
+.remote-calendar-day.selected {
+  border-color: #9f2d55;
+  background: #9f2d55;
+  color: #ffffff;
+  box-shadow: 0 0 0 2px rgba(159, 45, 85, 0.14);
+}
+
+.remote-calendar-day.selected small {
+  background: rgba(255, 255, 255, 0.24);
+  color: #ffffff;
+}
+
+.remote-calendar-day svg {
+  width: 13px;
+  height: 13px;
+}
+
+.remote-calendar-empty {
+  margin: 0;
+  color: #667085;
+  font-size: 0.8rem;
 }
 
 .rail-actions {

@@ -25,6 +25,7 @@ import {
   FolderOpen,
   Import,
   LocateFixed,
+  LoaderCircle,
   MapPin,
   Maximize2,
   Paperclip,
@@ -148,6 +149,7 @@ type Trip = {
   workspaceId: string;
   name: string;
   notes: string;
+  remoteWorkDates: string[];
   stops: TripStop[];
   documents: TripDocument[];
   createdAt: string;
@@ -176,6 +178,7 @@ type CompactSharedTrip = {
   f: 'rtp2';
   n: string;
   o?: string;
+  r?: string[];
   s: CompactSharedTripStop[];
 };
 
@@ -309,6 +312,7 @@ const defaultMaxCarLegHours = 14;
 const estimatedAverageMph = 55;
 const sleepingArrangementOptions: SleepingArrangement[] = ['camping', 'hotel', 'friend'];
 const travelModeOptions: TravelMode[] = ['car', 'plane', 'boat'];
+const remoteCalendarWeekdays = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const nonCarTravelCostAssumptions: Record<Exclude<TravelMode, 'car'>, { base: number; perMile: number; minimum: number }> = {
   plane: { base: 95, perMile: 0.22, minimum: 140 },
   boat: { base: 45, perMile: 0.75, minimum: 65 },
@@ -381,6 +385,7 @@ const exportFormatExample = JSON.stringify(
       id: 'trip-example',
       name: 'Southwest loop',
       notes: 'Museum stops, desert drives, remote-work days.',
+      remoteWorkDates: ['2026-07-21'],
       createdAt: '2026-05-24T00:00:00.000Z',
       updatedAt: '2026-05-24T00:00:00.000Z',
       documents: [
@@ -407,7 +412,7 @@ const exportFormatExample = JSON.stringify(
           lat: 30.3322,
           lng: -81.6557,
           notes: 'Start',
-          remoteWork: false,
+          remoteWork: true,
           sleepingArrangement: 'camping',
           friendName: '',
           travelMode: 'car',
@@ -463,6 +468,65 @@ function resequenceStops(stops: TripStop[]) {
   return [...stops]
     .sort((a, b) => a.order - b.order)
     .map((stop, index) => ({ ...stop, order: index + 1 }));
+}
+
+function isDateOnly(value: unknown): value is string {
+  return typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function getDateOnlyTime(date: string) {
+  return new Date(`${date}T00:00:00`).getTime();
+}
+
+function addDays(date: string, days: number) {
+  const parsed = new Date(`${date}T00:00:00`);
+  parsed.setDate(parsed.getDate() + days);
+
+  return parsed.toISOString().slice(0, 10);
+}
+
+function normalizeRemoteWorkDates(value: unknown, stops: Pick<TripStop, 'date' | 'remoteWork'>[] = []) {
+  const remoteWorkDates = new Set<string>();
+
+  if (Array.isArray(value)) {
+    value.forEach((date) => {
+      if (isDateOnly(date)) {
+        remoteWorkDates.add(date);
+      }
+    });
+  }
+
+  stops.forEach((stop) => {
+    if (stop.remoteWork && isDateOnly(stop.date)) {
+      remoteWorkDates.add(stop.date);
+    }
+  });
+
+  return Array.from(remoteWorkDates).sort();
+}
+
+function applyRemoteWorkDatesToStops(stops: TripStop[], remoteWorkDates: string[]) {
+  const remoteWorkDateSet = new Set(remoteWorkDates);
+
+  return stops.map((stop) => ({
+    ...stop,
+    remoteWork: isDateOnly(stop.date) && remoteWorkDateSet.has(stop.date),
+  }));
+}
+
+function buildTripCalendarDates(stops: TripStop[], remoteWorkDates: string[]) {
+  const dates = [...stops.map((stop) => stop.date), ...remoteWorkDates].filter(isDateOnly).sort();
+  if (!dates.length) return [];
+
+  const firstDate = dates[0];
+  const lastDate = dates[dates.length - 1];
+  const dayCount = Math.round((getDateOnlyTime(lastDate) - getDateOnlyTime(firstDate)) / (24 * 60 * 60 * 1000)) + 1;
+
+  if (!Number.isFinite(dayCount) || dayCount <= 0 || dayCount > 370) {
+    return Array.from(new Set(dates));
+  }
+
+  return Array.from({ length: dayCount }, (_, index) => addDays(firstDate, index));
 }
 
 function normalizeSleepingArrangement(value: unknown): SleepingArrangement {
@@ -552,7 +616,7 @@ function normalizeTrip(
     typeof candidate.workspaceId === 'string' && candidate.workspaceId
       ? candidate.workspaceId
       : fallbackWorkspaceId;
-  const stops = candidate.stops
+  const rawStops = candidate.stops
     .filter((stop) => stop && typeof stop.label === 'string')
     .map((stop, index) => ({
       id: typeof stop.id === 'string' ? stop.id : makeId('stop'),
@@ -567,6 +631,12 @@ function normalizeTrip(
       friendName: typeof stop.friendName === 'string' ? stop.friendName : '',
       travelMode: index === 0 ? 'car' : normalizeTravelMode(stop.travelMode),
     }));
+  const remoteWorkDates = normalizeRemoteWorkDates(candidate.remoteWorkDates, rawStops);
+  const remoteWorkDateSet = new Set(remoteWorkDates);
+  const stops = rawStops.map((stop) => ({
+    ...stop,
+    remoteWork: isDateOnly(stop.date) && remoteWorkDateSet.has(stop.date),
+  }));
   const stopIds = new Set(stops.map((stop) => stop.id));
   const documents = Array.isArray(candidate.documents)
     ? candidate.documents
@@ -579,6 +649,7 @@ function normalizeTrip(
     workspaceId,
     name: candidate.name?.trim() || 'Untitled trip',
     notes: typeof candidate.notes === 'string' ? candidate.notes : '',
+    remoteWorkDates,
     stops: resequenceStops(stops),
     documents,
     createdAt: typeof candidate.createdAt === 'string' ? candidate.createdAt : now,
@@ -594,6 +665,7 @@ function createDefaultTrip(workspaceId = defaultWorkspaceId): Trip {
     workspaceId,
     name: '2026 USA itinerary',
     notes: 'Jacksonville to Winston-Salem through the Southwest, California, and the Blue Ridge.',
+    remoteWorkDates: normalizeRemoteWorkDates([], seedStops),
     stops: seedStops,
     documents: [],
     createdAt: now,
@@ -609,6 +681,7 @@ function createBlankTrip(workspaceId = defaultWorkspaceId, name = 'Untitled trip
     workspaceId,
     name,
     notes: '',
+    remoteWorkDates: [],
     stops: [
       {
         id: makeId('stop'),
@@ -1093,6 +1166,7 @@ function createCompactSharedTrip(trip: Trip): CompactSharedTrip {
     f: compactTripShareFormat,
     n: normalizedTrip.name,
     o: normalizedTrip.notes || undefined,
+    r: normalizedTrip.remoteWorkDates.length ? normalizedTrip.remoteWorkDates : undefined,
     s: normalizedTrip.stops.map((stop) => {
       const fields: CompactSharedTripStop = [
         stop.date,
@@ -1135,6 +1209,7 @@ function parseCompactSharedTrip(candidate: unknown, workspaceId = defaultWorkspa
       workspaceId,
       name: typeof compactTrip.n === 'string' && compactTrip.n ? compactTrip.n : 'Shared route',
       notes: typeof compactTrip.o === 'string' ? compactTrip.o : '',
+      remoteWorkDates: normalizeRemoteWorkDates(compactTrip.r),
       documents: [],
       stops: compactStops.map((stop, index) => ({
         id: makeId('stop'),
@@ -1232,10 +1307,16 @@ function savedRouteTokenMatchesTrip(token: string, trip: Pick<Trip, 'id' | 'name
   return token === routeToken || token === trip.id || token === `${routeToken}-${trip.id}` || token.endsWith(`-${trip.id}`);
 }
 
-function findSavedRouteTokenConflict(trip: Pick<Trip, 'id' | 'name'>, trips: Array<Pick<Trip, 'id' | 'name'>>) {
+function hasSavedRouteTokenConflict(trip: Pick<Trip, 'id' | 'name'>, trips: Array<Pick<Trip, 'id' | 'name'>>) {
   const routeToken = createSavedRouteToken(trip.name);
 
-  return trips.find((savedTrip) => savedTrip.id !== trip.id && createSavedRouteToken(savedTrip.name) === routeToken);
+  return trips.some((savedTrip) => savedTrip.id !== trip.id && createSavedRouteToken(savedTrip.name) === routeToken);
+}
+
+function createSavedRouteTokenForTrip(trip: Pick<Trip, 'id' | 'name'>, trips: Array<Pick<Trip, 'id' | 'name'>> = []) {
+  const routeToken = createSavedRouteToken(trip.name);
+
+  return hasSavedRouteTokenConflict(trip, trips) ? `${routeToken}-${trip.id}` : routeToken;
 }
 
 function createUniqueSavedTripName(name: string, trips: Array<Pick<Trip, 'name'>>) {
@@ -1341,7 +1422,7 @@ function clearAiSettingsUrl(replace = false) {
   }
 }
 
-function setSavedRouteUrl(trip: Pick<Trip, 'id' | 'name'>, replace = false) {
+function setSavedRouteUrl(trip: Pick<Trip, 'id' | 'name'>, trips: Array<Pick<Trip, 'id' | 'name'>> = [], replace = false) {
   const url = new URL(window.location.href);
   const hashParams = new URLSearchParams(url.hash.replace(/^#/, ''));
 
@@ -1349,7 +1430,7 @@ function setSavedRouteUrl(trip: Pick<Trip, 'id' | 'name'>, replace = false) {
     hashParams.delete(param);
     url.searchParams.delete(param);
   });
-  hashParams.set(savedRouteParam, createSavedRouteToken(trip.name));
+  hashParams.set(savedRouteParam, createSavedRouteTokenForTrip(trip, trips));
   url.searchParams.delete(savedRouteParam);
 
   const nextHash = hashParams.toString();
@@ -1696,6 +1777,13 @@ function formatScheduleDate(date: string) {
     month: 'short',
     day: 'numeric',
   }).format(parsed);
+}
+
+function formatCalendarDayNumber(date: string) {
+  const parsed = new Date(`${date}T00:00:00`);
+  if (Number.isNaN(parsed.getTime())) return '';
+
+  return String(parsed.getDate());
 }
 
 function formatMapDateRange(stops: TripStop[]) {
@@ -2692,6 +2780,16 @@ function App() {
     [activeWorkspaceId, workspaces],
   );
   const stops = useMemo(() => resequenceStops(activeTrip.stops), [activeTrip.stops]);
+  const remoteWorkDates = useMemo(
+    () => normalizeRemoteWorkDates(activeTrip.remoteWorkDates, stops),
+    [activeTrip.remoteWorkDates, stops],
+  );
+  const remoteWorkDateSet = useMemo(() => new Set(remoteWorkDates), [remoteWorkDates]);
+  const tripCalendarDates = useMemo(() => buildTripCalendarDates(stops, remoteWorkDates), [remoteWorkDates, stops]);
+  const remoteCalendarFirstDay = tripCalendarDates[0]
+    ? new Date(`${tripCalendarDates[0]}T00:00:00`).getDay()
+    : 0;
+  const remoteCalendarLeadingBlankCount = Number.isFinite(remoteCalendarFirstDay) ? remoteCalendarFirstDay : 0;
   const selectedStop = useMemo(
     () => stops.find((stop) => stop.id === selectedStopId) || null,
     [selectedStopId, stops],
@@ -2716,7 +2814,7 @@ function App() {
   const displayLodgingCost = formatCurrency(lodgingCost);
   const displayNonCarTravelCost = formatCurrency(nonCarTravelCost);
   const displayTripTotal = formatCurrency(gasCost + lodgingCost + nonCarTravelCost);
-  const remoteStops = useMemo(() => stops.filter((stop) => stop.remoteWork).length, [stops]);
+  const remoteWorkDayCount = remoteWorkDates.length;
   const nonCarTravelLegs = useMemo(() => countNonCarTravelLegs(stops), [stops]);
   const overlongCarLegs = useMemo(
     () => countOverlongCarLegs(stops, driveEstimateByStopId, maxCarLegHours),
@@ -2948,12 +3046,51 @@ function App() {
   };
 
   const updateStop = (stopId: string, updates: Partial<TripStop>) => {
-    touchTrip((trip) => ({
-      ...trip,
-      stops: resequenceStops(
+    touchTrip((trip) => {
+      const updatedStops = resequenceStops(
         trip.stops.map((stop) => (stop.id === stopId ? { ...stop, ...updates } : stop)),
-      ),
-    }));
+      );
+      const remoteWorkDateSet = new Set(normalizeRemoteWorkDates(trip.remoteWorkDates));
+      const updatedStop = updatedStops.find((stop) => stop.id === stopId);
+
+      if (updatedStop && 'remoteWork' in updates && isDateOnly(updatedStop.date)) {
+        if (updates.remoteWork) {
+          remoteWorkDateSet.add(updatedStop.date);
+        } else {
+          remoteWorkDateSet.delete(updatedStop.date);
+        }
+      }
+
+      const remoteWorkDates = Array.from(remoteWorkDateSet).sort();
+
+      return {
+        ...trip,
+        remoteWorkDates,
+        stops: applyRemoteWorkDatesToStops(updatedStops, remoteWorkDates),
+      };
+    });
+  };
+
+  const setRemoteWorkDate = (date: string, enabled: boolean) => {
+    if (!isDateOnly(date)) return;
+
+    touchTrip((trip) => {
+      const remoteWorkDateSet = new Set(normalizeRemoteWorkDates(trip.remoteWorkDates));
+
+      if (enabled) {
+        remoteWorkDateSet.add(date);
+      } else {
+        remoteWorkDateSet.delete(date);
+      }
+
+      const remoteWorkDates = Array.from(remoteWorkDateSet).sort();
+
+      return {
+        ...trip,
+        remoteWorkDates,
+        stops: applyRemoteWorkDatesToStops(trip.stops, remoteWorkDates),
+      };
+    });
   };
 
   const updateStopNumber = (stopId: string, field: 'lat' | 'lng', value: string) => {
@@ -3075,7 +3212,14 @@ function App() {
     touchTrip((trip) => {
       const before = trip.stops.filter((stop) => stop.order < order);
       const after = trip.stops.filter((stop) => stop.order >= order);
-      return { ...trip, stops: resequenceStops([...before, newStop, ...after]) };
+      const remoteWorkDates = normalizeRemoteWorkDates(trip.remoteWorkDates);
+      const nextStops = resequenceStops([...before, newStop, ...after]);
+
+      return {
+        ...trip,
+        remoteWorkDates,
+        stops: applyRemoteWorkDatesToStops(nextStops, remoteWorkDates),
+      };
     });
     setSelectedStopId(newStop.id);
     setIsPlacingPin(false);
@@ -3145,7 +3289,14 @@ function App() {
     touchTrip((trip) => {
       const before = trip.stops.filter((stop) => stop.order < order);
       const after = trip.stops.filter((stop) => stop.order >= order);
-      return { ...trip, stops: resequenceStops([...before, newStop, ...after]) };
+      const remoteWorkDates = normalizeRemoteWorkDates(trip.remoteWorkDates);
+      const nextStops = resequenceStops([...before, newStop, ...after]);
+
+      return {
+        ...trip,
+        remoteWorkDates,
+        stops: applyRemoteWorkDatesToStops(nextStops, remoteWorkDates),
+      };
     });
     setSelectedStopId(newStop.id);
   };
@@ -3164,7 +3315,14 @@ function App() {
       const nextStops = trip.stops.map((stop) =>
         stop.order > selectedStop.order ? { ...stop, order: stop.order + 1 } : stop,
       );
-      return { ...trip, stops: resequenceStops([...nextStops, copy]) };
+      const remoteWorkDates = normalizeRemoteWorkDates(trip.remoteWorkDates);
+      const resequencedStops = resequenceStops([...nextStops, copy]);
+
+      return {
+        ...trip,
+        remoteWorkDates,
+        stops: applyRemoteWorkDatesToStops(resequencedStops, remoteWorkDates),
+      };
     });
     setSelectedStopId(copy.id);
   };
@@ -3175,13 +3333,19 @@ function App() {
     const nextSelection =
       stops[selectedStop.order] || stops[selectedStop.order - 2] || stops.find((stop) => stop.id !== selectedStop.id);
 
-    touchTrip((trip) => ({
-      ...trip,
-      stops: resequenceStops(trip.stops.filter((stop) => stop.id !== selectedStop.id)),
-      documents: trip.documents.map((document) =>
-        document.linkedStopId === selectedStop.id ? { ...document, linkedStopId: '' } : document,
-      ),
-    }));
+    touchTrip((trip) => {
+      const remoteWorkDates = normalizeRemoteWorkDates(trip.remoteWorkDates);
+      const nextStops = resequenceStops(trip.stops.filter((stop) => stop.id !== selectedStop.id));
+
+      return {
+        ...trip,
+        remoteWorkDates,
+        stops: applyRemoteWorkDatesToStops(nextStops, remoteWorkDates),
+        documents: trip.documents.map((document) =>
+          document.linkedStopId === selectedStop.id ? { ...document, linkedStopId: '' } : document,
+        ),
+      };
+    });
     setSelectedStopId(nextSelection?.id || null);
   };
 
@@ -3194,7 +3358,16 @@ function App() {
 
     const nextStops = [...stops];
     [nextStops[index], nextStops[swapIndex]] = [nextStops[swapIndex], nextStops[index]];
-    touchTrip((trip) => ({ ...trip, stops: resequenceStops(nextStops) }));
+    touchTrip((trip) => {
+      const remoteWorkDates = normalizeRemoteWorkDates(trip.remoteWorkDates);
+      const resequencedStops = resequenceStops(nextStops);
+
+      return {
+        ...trip,
+        remoteWorkDates,
+        stops: applyRemoteWorkDatesToStops(resequencedStops, remoteWorkDates),
+      };
+    });
   };
 
   const getActiveTripForExport = () =>
@@ -3232,7 +3405,7 @@ function App() {
     } catch (error) {
       if (error instanceof Error && error.message.startsWith('CREATE_SHARED_TRIP_DUPLICATE_')) {
         const slug = error.message.replace('CREATE_SHARED_TRIP_DUPLICATE_', '');
-        setSaveMessage(`Share URL /share/${slug} already exists. Rename this trip to share it.`);
+        setSaveMessage(`Share URL /share/${slug} already exists. Try sharing again.`);
       } else {
         setSaveMessage('Share link copy failed');
       }
@@ -3248,12 +3421,6 @@ function App() {
       const importedTrip = parseTripImport(JSON.parse(jsonText), activeWorkspaceId);
       if (!importedTrip) {
         setSaveMessage('Import needs a saved-trip export or stop list');
-        return;
-      }
-
-      const routeTokenConflict = findSavedRouteTokenConflict(importedTrip, savedTrips);
-      if (routeTokenConflict) {
-        setSaveMessage(`Import blocked: #route=${createSavedRouteToken(importedTrip.name)} already exists`);
         return;
       }
 
@@ -3392,7 +3559,7 @@ function App() {
   ) => {
     setActiveTrip(tripToSave);
     setSavedTrips(nextSavedTrips);
-    setSavedRouteUrl(tripToSave, true);
+    setSavedRouteUrl(tripToSave, nextSavedTrips, true);
     setIsSaving(true);
 
     try {
@@ -3415,11 +3582,6 @@ function App() {
     const tripToSave =
       normalizeTrip({ ...activeTrip, workspaceId: activeWorkspaceId, stops, updatedAt: now }, activeWorkspaceId) ||
       activeTrip;
-    const routeTokenConflict = findSavedRouteTokenConflict(tripToSave, savedTrips);
-    if (routeTokenConflict) {
-      setSaveMessage(`Route URL #route=${createSavedRouteToken(tripToSave.name)} already exists. Rename this trip before saving.`);
-      return;
-    }
 
     const nextSavedTrips = [
       tripToSave,
@@ -3445,11 +3607,6 @@ function App() {
         },
         activeWorkspaceId,
       ) || activeTrip;
-    const routeTokenConflict = findSavedRouteTokenConflict(tripToSave, savedTrips);
-    if (routeTokenConflict) {
-      setSaveMessage(`Route URL #route=${createSavedRouteToken(tripToSave.name)} already exists. Rename this trip before saving.`);
-      return;
-    }
 
     const nextSavedTrips = [
       tripToSave,
@@ -3515,6 +3672,7 @@ function App() {
         workspaceId: activeWorkspaceId,
         name: `${start.label} to ${end.label}`,
         notes: '',
+        remoteWorkDates: [],
         stops: [
           {
             id: makeId('stop'),
@@ -3643,7 +3801,7 @@ function App() {
     setCurrentView('editor');
     setSaveMessage(`Loaded ${nextTrip.name}`);
     if (syncUrl) {
-      setSavedRouteUrl(nextTrip);
+      setSavedRouteUrl(nextTrip, savedTrips);
     }
     setFitSignal((value) => value + 1);
   };
@@ -3854,7 +4012,7 @@ function App() {
 
   const handleRemoteChange = (event: ChangeEvent<HTMLInputElement>) => {
     if (!selectedStop) return;
-    updateStop(selectedStop.id, { remoteWork: event.currentTarget.checked });
+    setRemoteWorkDate(selectedStop.date, event.currentTarget.checked);
   };
 
   const handleSleepingArrangementChange = (event: ChangeEvent<HTMLSelectElement>) => {
@@ -4046,7 +4204,7 @@ function App() {
               className="primary-button"
               disabled={isRouteAssistantWorking || !routeAssistantPrompt.trim()}
             >
-              <Sparkles size={17} />
+              {isRouteAssistantWorking ? <LoaderCircle className="loading-icon" size={17} /> : <Sparkles size={17} />}
               <span>{isRouteAssistantWorking ? 'Working' : 'Update route'}</span>
             </button>
           </form>
@@ -4101,8 +4259,8 @@ function App() {
                 <span>Trip total</span>
               </div>
               <div>
-                <strong>{remoteStops}</strong>
-                <span>Remote</span>
+                <strong>{remoteWorkDayCount}</strong>
+                <span>Remote days</span>
               </div>
               <div>
                 <strong>{nonCarTravelLegs}</strong>
@@ -4153,6 +4311,63 @@ function App() {
                   onChange={(event) => updateMaxCarLegHours(event.currentTarget.value)}
                 />
               </span>
+            </div>
+
+            <div className="remote-work-calendar" aria-label="Remote work dates">
+              <div className="remote-calendar-title">
+                <span>
+                  <CalendarDays size={16} />
+                  <strong>Remote work dates</strong>
+                </span>
+                <small>{remoteWorkDayCount} selected</small>
+              </div>
+              {tripCalendarDates.length ? (
+                <div className="remote-calendar-grid">
+                  {remoteCalendarWeekdays.map((weekday) => (
+                    <span key={weekday} className="remote-calendar-weekday">
+                      {weekday}
+                    </span>
+                  ))}
+                  {Array.from({ length: remoteCalendarLeadingBlankCount }, (_, index) => (
+                    <span key={`blank-${index}`} className="remote-calendar-blank" aria-hidden="true" />
+                  ))}
+                  {tripCalendarDates.map((date) => {
+                    const isSelected = remoteWorkDateSet.has(date);
+                    const dateStopCount = stops.filter((stop) => stop.date === date).length;
+                    const dayClassName = [
+                      'remote-calendar-day',
+                      isSelected ? 'selected' : '',
+                      isWeekendDate(date) ? 'weekend' : '',
+                      dateStopCount ? 'has-stop' : '',
+                    ]
+                      .filter(Boolean)
+                      .join(' ');
+                    const stopLabel = dateStopCount === 1 ? '1 stop' : `${dateStopCount} stops`;
+
+                    return (
+                      <button
+                        key={date}
+                        type="button"
+                        className={dayClassName}
+                        onClick={() => setRemoteWorkDate(date, !isSelected)}
+                        aria-pressed={isSelected}
+                        aria-label={`${formatScheduleDate(date)}${dateStopCount ? `, ${stopLabel}` : ''}${
+                          isSelected ? ', remote work' : ''
+                        }`}
+                        title={`${formatScheduleDate(date)}${dateStopCount ? ` | ${stopLabel}` : ''}${
+                          isSelected ? ' | Remote work' : ''
+                        }`}
+                      >
+                        <span>{formatCalendarDayNumber(date)}</span>
+                        {dateStopCount > 0 && <small>{dateStopCount}</small>}
+                        {isSelected && <Wifi size={13} />}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <p className="remote-calendar-empty">No dated stops.</p>
+              )}
             </div>
 
             <label className="toggle-row hotel-finder-toggle" htmlFor="hotel-finder">
@@ -4229,11 +4444,12 @@ function App() {
                 );
                 const carDayWarning = getCarLegDayWarning(stop, stopIndex, stops, driveEstimate, maxCarLegHours);
                 const stopIsWeekend = isWeekendDate(stop.date);
+                const stopIsRemoteWork = isDateOnly(stop.date) && remoteWorkDateSet.has(stop.date);
                 const stopCardClassName = [
                   'stop-card',
                   getSleepClass(stop.sleepingArrangement),
                   carDayWarning ? 'long-car-day' : '',
-                  stop.remoteWork ? 'remote' : '',
+                  stopIsRemoteWork ? 'remote' : '',
                   stopIsWeekend ? 'weekend' : '',
                   stop.id === selectedStopId ? 'selected' : '',
                 ]
@@ -4286,11 +4502,11 @@ function App() {
                           </span>
                           {travelMode !== 'car' && <span className="stop-tag travel">{getTravelModeLabel(travelMode)}</span>}
                           {carDayWarning && <span className="stop-tag long-drive">Long car day</span>}
-                          {stop.remoteWork && <span className="stop-tag remote">Remote work</span>}
+                          {stopIsRemoteWork && <span className="stop-tag remote">Remote work</span>}
                           {stopIsWeekend && <span className="stop-tag weekend">Weekend</span>}
                         </span>
                       </span>
-                      {stop.remoteWork && (
+                      {stopIsRemoteWork && (
                         <span className="mini-badge" title="Remote-work stop">
                           <Wifi size={14} />
                         </span>
@@ -4497,10 +4713,11 @@ function App() {
                 <input
                   id="remote-work"
                   type="checkbox"
-                  checked={Boolean(selectedStop.remoteWork)}
+                  checked={isDateOnly(selectedStop.date) && remoteWorkDateSet.has(selectedStop.date)}
                   onChange={handleRemoteChange}
+                  disabled={!isDateOnly(selectedStop.date)}
                 />
-                <span>Remote-work stop</span>
+                <span>Remote-work day</span>
               </label>
 
               <div className="stop-document-actions">
@@ -4766,7 +4983,7 @@ function App() {
             </span>
             <div className="ai-page-actions">
               <button type="button" className="secondary-button" onClick={loadOpenAIModels} disabled={isLoadingOpenAIModels}>
-                <RefreshCw size={17} />
+                {isLoadingOpenAIModels ? <LoaderCircle className="loading-icon" size={17} /> : <RefreshCw size={17} />}
                 <span>{isLoadingOpenAIModels ? 'Loading' : 'Refresh'}</span>
               </button>
               <button type="button" className="secondary-button" onClick={resetAiModelSettings}>
@@ -5019,7 +5236,7 @@ function App() {
                     className="primary-button"
                     disabled={isNewTripAssistantWorking || !newTripPrompt.trim()}
                   >
-                    <Sparkles size={17} />
+                    {isNewTripAssistantWorking ? <LoaderCircle className="loading-icon" size={17} /> : <Sparkles size={17} />}
                     <span>{isNewTripAssistantWorking ? 'Planning' : 'Generate trip'}</span>
                   </button>
                 </footer>
