@@ -30,6 +30,7 @@ import {
   Paperclip,
   Plane,
   Plus,
+  RefreshCw,
   Route,
   Save,
   Share2,
@@ -188,7 +189,7 @@ type SharedTripResponse = {
 };
 
 type SaveBackend = 'checking' | 'database' | 'local';
-type AppView = 'editor' | 'saved';
+type AppView = 'editor' | 'saved' | 'ai';
 type NewTripMode = 'setup' | 'ai' | 'json';
 
 type NewTripDraft = {
@@ -203,8 +204,25 @@ type RouteAssistantResult = {
   trip: Trip;
 };
 
+type RouteAssistantContextMessage = {
+  role: 'user' | 'assistant';
+  content: string;
+};
+
 type RouteAssistantSettings = {
   maxCarLegHours: number;
+  model?: string;
+};
+
+type AiModelSettings = {
+  routeAssistantModel: string;
+  tripStarterModel: string;
+};
+
+type OpenAIModelOption = {
+  id: string;
+  ownedBy: string;
+  created: number;
 };
 
 type RoadRoute = {
@@ -259,6 +277,7 @@ const activeWorkspaceKey = 'road-trip-planner.activeWorkspace.v1';
 const gasPriceKey = 'road-trip-planner.gasPrice.v1';
 const fuelMpgKey = 'road-trip-planner.fuelMpg.v1';
 const maxCarLegHoursKey = 'road-trip-planner.maxCarLegHours.v1';
+const aiModelSettingsKey = 'road-trip-planner.aiModelSettings.v1';
 const routeCacheKey = 'road-trip-planner.routeCache.v1';
 const hotelCacheKey = 'road-trip-planner.hotelCache.v1';
 const defaultWorkspaceId = 'workspace-default';
@@ -270,7 +289,9 @@ const shortTripShareParam = 'share';
 const compactTripShareParam = 't';
 const legacyTripShareParam = 'trip';
 const sharePathPrefix = '/share/';
+const aiSettingsPath = '/AI';
 const routeAssistantPromptMaxLength = 12000;
+const maxRouteAssistantContextMessages = 5;
 const maxStopsPerDirectionsRequest = 25;
 const maxHotelSearchPoints = 8;
 const maxHotelCandidates = 12;
@@ -618,6 +639,23 @@ function createEmptyNewTripDraft(): NewTripDraft {
   };
 }
 
+function createEmptyAiModelSettings(): AiModelSettings {
+  return {
+    routeAssistantModel: '',
+    tripStarterModel: '',
+  };
+}
+
+function normalizeAiModelSettings(value: unknown): AiModelSettings {
+  if (!value || typeof value !== 'object') return createEmptyAiModelSettings();
+
+  const settings = value as Partial<AiModelSettings>;
+  return {
+    routeAssistantModel: typeof settings.routeAssistantModel === 'string' ? settings.routeAssistantModel : '',
+    tripStarterModel: typeof settings.tripStarterModel === 'string' ? settings.tripStarterModel : '',
+  };
+}
+
 function workspaceStorageKey(baseKey: string, workspaceId: string) {
   return `${baseKey}.${workspaceId}`;
 }
@@ -708,6 +746,19 @@ function getInitialWorkspaceSnapshot() {
     savedTrips: readSavedTrips(activeWorkspaceId),
     activeTrip: createInitialTripForWorkspace(activeWorkspaceId),
   };
+}
+
+function readAiModelSettings() {
+  try {
+    const saved = window.localStorage.getItem(aiModelSettingsKey);
+    return normalizeAiModelSettings(saved ? JSON.parse(saved) : null);
+  } catch {
+    return createEmptyAiModelSettings();
+  }
+}
+
+function writeAiModelSettings(settings: AiModelSettings) {
+  writeStorage(aiModelSettingsKey, normalizeAiModelSettings(settings));
 }
 
 function writeWorkspaceActiveTrip(workspaceId: string, trip: Trip) {
@@ -876,10 +927,44 @@ async function deleteTripFromDatabase(tripId: string) {
   }
 }
 
+async function requestOpenAIModels(): Promise<OpenAIModelOption[]> {
+  const response = await fetch('/api/openai-models', {
+    headers: { accept: 'application/json' },
+  });
+
+  if (!response.ok) {
+    throw new Error(`OPENAI_MODELS_${response.status}`);
+  }
+
+  const payload = await response.json();
+  if (!Array.isArray(payload.models)) {
+    throw new Error('INVALID_OPENAI_MODELS_RESPONSE');
+  }
+
+  return payload.models
+    .map((model: Partial<OpenAIModelOption>) => ({
+      id: typeof model.id === 'string' ? model.id : '',
+      ownedBy: typeof model.ownedBy === 'string' ? model.ownedBy : '',
+      created: Number.isFinite(Number(model.created)) ? Number(model.created) : 0,
+    }))
+    .filter((model: OpenAIModelOption) => model.id);
+}
+
+function trimRouteAssistantContext(messages: RouteAssistantContextMessage[]) {
+  return messages
+    .map((message) => ({
+      role: message.role,
+      content: message.content.trim(),
+    }))
+    .filter((message) => message.content)
+    .slice(-maxRouteAssistantContextMessages);
+}
+
 async function requestRouteAssistant(
   trip: Trip,
   instruction: string,
   settings: RouteAssistantSettings,
+  contextMessages: RouteAssistantContextMessage[] = [],
 ): Promise<RouteAssistantResult> {
   const response = await fetch('/api/route-assistant', {
     method: 'POST',
@@ -887,7 +972,12 @@ async function requestRouteAssistant(
       accept: 'application/json',
       'content-type': 'application/json',
     },
-    body: JSON.stringify({ trip, instruction, settings }),
+    body: JSON.stringify({
+      trip,
+      instruction,
+      settings,
+      contextMessages: trimRouteAssistantContext(contextMessages),
+    }),
   });
 
   if (!response.ok) {
@@ -1231,6 +1321,35 @@ function getSavedRouteIdFromUrl() {
   if (hashRoute) return hashRoute;
 
   return new URLSearchParams(window.location.search).get(savedRouteParam) || '';
+}
+
+function isAiSettingsPath() {
+  return window.location.pathname.toLowerCase() === aiSettingsPath.toLowerCase();
+}
+
+function getInitialAppView(): AppView {
+  return isAiSettingsPath() ? 'ai' : 'editor';
+}
+
+function setAiSettingsUrl(replace = false) {
+  const currentUrl = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (currentUrl === aiSettingsPath) return;
+
+  if (replace) {
+    window.history.replaceState(null, '', aiSettingsPath);
+  } else {
+    window.history.pushState(null, '', aiSettingsPath);
+  }
+}
+
+function clearAiSettingsUrl(replace = false) {
+  if (!isAiSettingsPath()) return;
+
+  if (replace) {
+    window.history.replaceState(null, '', '/');
+  } else {
+    window.history.pushState(null, '', '/');
+  }
 }
 
 function setSavedRouteUrl(trip: Pick<Trip, 'id' | 'name'>, replace = false) {
@@ -2538,11 +2657,17 @@ function App() {
   const [locationMessage, setLocationMessage] = useState('');
   const [isLocating, setIsLocating] = useState(false);
   const [showHotelFinder, setShowHotelFinder] = useState(false);
-  const [currentView, setCurrentView] = useState<AppView>('editor');
+  const [currentView, setCurrentView] = useState<AppView>(() => getInitialAppView());
   const [saveMessage, setSaveMessage] = useState('');
   const [routeAssistantPrompt, setRouteAssistantPrompt] = useState('');
   const [routeAssistantMessage, setRouteAssistantMessage] = useState('');
+  const [routeAssistantContextMessages, setRouteAssistantContextMessages] = useState<RouteAssistantContextMessage[]>([]);
   const [isRouteAssistantWorking, setIsRouteAssistantWorking] = useState(false);
+  const [aiModelSettings, setAiModelSettings] = useState<AiModelSettings>(() => readAiModelSettings());
+  const [aiSettingsMessage, setAiSettingsMessage] = useState('');
+  const [openAIModels, setOpenAIModels] = useState<OpenAIModelOption[]>([]);
+  const [isLoadingOpenAIModels, setIsLoadingOpenAIModels] = useState(false);
+  const [hasLoadedOpenAIModels, setHasLoadedOpenAIModels] = useState(false);
   const [newTripPrompt, setNewTripPrompt] = useState('');
   const [newTripAssistantMessage, setNewTripAssistantMessage] = useState('');
   const [isNewTripAssistantWorking, setIsNewTripAssistantWorking] = useState(false);
@@ -2795,9 +2920,11 @@ function App() {
 
       setDrivingMiles(null);
       setRoadDriveEstimates(null);
+      setRouteAssistantContextMessages([]);
       setActiveTrip(sharedTrip);
       setSelectedStopId(sharedTrip.stops[0]?.id || null);
       setSelectedDocumentId(null);
+      clearAiSettingsUrl(true);
       setCurrentView('editor');
       setSaveMessage(`Shared route loaded: ${sharedTrip.name}. Save it when ready.`);
       setFitSignal((value) => value + 1);
@@ -3147,10 +3274,12 @@ function App() {
 
       setDrivingMiles(null);
       setRoadDriveEstimates(null);
+      setRouteAssistantContextMessages([]);
       setActiveTrip(importedTrip);
       setSelectedStopId(importedTrip.stops[0]?.id || null);
       setSelectedDocumentId(importedTrip.documents[0]?.id || null);
       setSavedTrips(nextSavedTrips);
+      clearAiSettingsUrl(true);
       setCurrentView('editor');
       clearSavedRouteUrl(true);
       setFitSignal((value) => value + 1);
@@ -3210,7 +3339,12 @@ function App() {
     setRouteAssistantMessage('Thinking through route changes and driving order...');
 
     try {
-      const result = await requestRouteAssistant(getActiveTripForExport(), instruction, { maxCarLegHours });
+      const result = await requestRouteAssistant(
+        getActiveTripForExport(),
+        instruction,
+        { maxCarLegHours, model: aiModelSettings.routeAssistantModel },
+        routeAssistantContextMessages,
+      );
       const now = new Date().toISOString();
       const proposedTrip = normalizeTrip(
         {
@@ -3234,11 +3368,19 @@ function App() {
       setActiveTrip(proposedTrip);
       setSelectedStopId(proposedTrip.stops[0]?.id || null);
       setSelectedDocumentId(proposedTrip.documents[0]?.id || null);
+      clearAiSettingsUrl(true);
       setCurrentView('editor');
       clearSavedRouteUrl(true);
       setFitSignal((value) => value + 1);
       setRouteAssistantPrompt('');
       setRouteAssistantMessage(`${result.summary} Save the draft when ready.`);
+      setRouteAssistantContextMessages((messages) =>
+        trimRouteAssistantContext([
+          ...messages,
+          { role: 'user', content: instruction },
+          { role: 'assistant', content: result.summary },
+        ]),
+      );
       setSaveMessage('AI route draft loaded');
     } catch (error) {
       const message = error instanceof Error && error.message.includes('503')
@@ -3418,9 +3560,11 @@ function App() {
 
       setDrivingMiles(null);
       setRoadDriveEstimates(null);
+      setRouteAssistantContextMessages([]);
       setActiveTrip(newTrip);
       setSelectedStopId(newTrip.stops[0].id);
       setSelectedDocumentId(null);
+      clearAiSettingsUrl(true);
       setCurrentView('editor');
       setSaveMessage(
         start.resolved && end.resolved
@@ -3446,7 +3590,11 @@ function App() {
     setNewTripAssistantMessage('Planning an initial trip...');
 
     try {
-      const result = await requestTripStarter(instruction, { maxCarLegHours }, activeWorkspaceId);
+      const result = await requestTripStarter(
+        instruction,
+        { maxCarLegHours, model: aiModelSettings.tripStarterModel },
+        activeWorkspaceId,
+      );
       const now = new Date().toISOString();
       const generatedTrip = normalizeTrip(
         {
@@ -3466,9 +3614,11 @@ function App() {
 
       setDrivingMiles(null);
       setRoadDriveEstimates(null);
+      setRouteAssistantContextMessages([]);
       setActiveTrip(generatedTrip);
       setSelectedStopId(generatedTrip.stops[0]?.id || null);
       setSelectedDocumentId(null);
+      clearAiSettingsUrl(true);
       setCurrentView('editor');
       setShowNewTripModal(false);
       setNewTripPrompt('');
@@ -3495,9 +3645,11 @@ function App() {
 
     setDrivingMiles(null);
     setRoadDriveEstimates(null);
+    setRouteAssistantContextMessages([]);
     setActiveTrip(nextTrip);
     setSelectedStopId(nextTrip.stops[0]?.id || null);
     setSelectedDocumentId(nextTrip.documents[0]?.id || null);
+    clearAiSettingsUrl(true);
     setCurrentView('editor');
     setSaveMessage(`Loaded ${nextTrip.name}`);
     if (syncUrl) {
@@ -3544,9 +3696,77 @@ function App() {
     };
   }, [activeTrip.id, currentView, saveBackend, savedTrips]);
 
+  useEffect(() => {
+    const syncViewFromPath = () => {
+      if (isAiSettingsPath()) {
+        setCurrentView('ai');
+        return;
+      }
+
+      setCurrentView((view) => (view === 'ai' ? 'editor' : view));
+    };
+
+    window.addEventListener('popstate', syncViewFromPath);
+    return () => window.removeEventListener('popstate', syncViewFromPath);
+  }, []);
+
+  useEffect(() => {
+    if (currentView === 'ai' && !hasLoadedOpenAIModels && !isLoadingOpenAIModels) {
+      loadOpenAIModels();
+    }
+  }, [currentView, hasLoadedOpenAIModels, isLoadingOpenAIModels]);
+
+  const openEditor = () => {
+    clearAiSettingsUrl();
+    setCurrentView('editor');
+  };
+
   const openSavedTrips = () => {
+    clearAiSettingsUrl();
     clearSavedRouteUrl();
     setCurrentView('saved');
+  };
+
+  const openAiSettings = () => {
+    clearSavedRouteUrl();
+    setAiSettingsUrl();
+    setCurrentView('ai');
+  };
+
+  const updateAiModelSetting = (field: keyof AiModelSettings, value: string) => {
+    setAiModelSettings((settings) => {
+      const nextSettings = normalizeAiModelSettings({ ...settings, [field]: value });
+      writeAiModelSettings(nextSettings);
+      return nextSettings;
+    });
+    setAiSettingsMessage('AI model settings saved');
+  };
+
+  const resetAiModelSettings = () => {
+    const nextSettings = createEmptyAiModelSettings();
+    setAiModelSettings(nextSettings);
+    writeAiModelSettings(nextSettings);
+    setAiSettingsMessage('AI model settings reset');
+  };
+
+  const loadOpenAIModels = async () => {
+    setIsLoadingOpenAIModels(true);
+    setHasLoadedOpenAIModels(true);
+    setAiSettingsMessage('Loading models...');
+
+    try {
+      const models = await requestOpenAIModels();
+      setOpenAIModels(models);
+      setAiSettingsMessage(models.length ? `${models.length} models available` : 'No models returned');
+    } catch (error) {
+      const message = error instanceof Error && error.message.includes('503')
+        ? 'OPENAI_TOKEN needed to list models'
+        : 'Model list failed';
+      setAiSettingsMessage(message);
+      setOpenAIModels([]);
+    } finally {
+      setIsLoadingOpenAIModels(false);
+    }
   };
 
   const removeSavedTrip = async (tripId: string) => {
@@ -3588,6 +3808,8 @@ function App() {
     setSelectedDocumentId(nextTrip.documents[0]?.id || null);
     setDrivingMiles(null);
     setRoadDriveEstimates(null);
+    setRouteAssistantContextMessages([]);
+    clearAiSettingsUrl(true);
     setRouteAssistantPrompt('');
     setRouteAssistantMessage('');
     setNewTripPrompt('');
@@ -3622,6 +3844,8 @@ function App() {
     setSelectedDocumentId(null);
     setDrivingMiles(null);
     setRoadDriveEstimates(null);
+    setRouteAssistantContextMessages([]);
+    clearAiSettingsUrl(true);
     setCurrentView('editor');
     setRouteAssistantPrompt('');
     setRouteAssistantMessage('');
@@ -3703,7 +3927,7 @@ function App() {
           <button
             type="button"
             className={currentView === 'editor' ? 'view-tab active' : 'view-tab'}
-            onClick={() => setCurrentView('editor')}
+            onClick={openEditor}
           >
             Editor
           </button>
@@ -3714,6 +3938,13 @@ function App() {
           >
             Saved trips
             <span>{savedTrips.length}</span>
+          </button>
+          <button
+            type="button"
+            className={currentView === 'ai' ? 'view-tab active' : 'view-tab'}
+            onClick={openAiSettings}
+          >
+            AI
           </button>
         </nav>
 
@@ -4412,7 +4643,7 @@ function App() {
         </aside>
       </div>
       </main>
-      ) : (
+      ) : currentView === 'saved' ? (
         <main className="saved-page" aria-label="Saved trips page">
           <section className="saved-page-header">
             <span>
@@ -4437,7 +4668,7 @@ function App() {
                 <FilePlus2 size={17} />
                 <span>New trip</span>
               </button>
-              <button type="button" className="primary-button" onClick={() => setCurrentView('editor')}>
+              <button type="button" className="primary-button" onClick={openEditor}>
                 <Route size={17} />
                 <span>Open editor</span>
               </button>
@@ -4535,6 +4766,110 @@ function App() {
                   <code>{exportFormatExample}</code>
                 </pre>
               </aside>
+            )}
+          </section>
+        </main>
+      ) : (
+        <main className="ai-page" aria-label="AI settings">
+          <section className="ai-page-header">
+            <span>
+              <h2>AI</h2>
+              <p>{aiSettingsMessage || 'Model settings'}</p>
+            </span>
+            <div className="ai-page-actions">
+              <button type="button" className="secondary-button" onClick={loadOpenAIModels} disabled={isLoadingOpenAIModels}>
+                <RefreshCw size={17} />
+                <span>{isLoadingOpenAIModels ? 'Loading' : 'Refresh'}</span>
+              </button>
+              <button type="button" className="secondary-button" onClick={resetAiModelSettings}>
+                <X size={17} />
+                <span>Reset models</span>
+              </button>
+            </div>
+          </section>
+
+          <section className="ai-settings-panel">
+            <div className="section-heading">
+              <h2>Models</h2>
+              <span>{aiModelSettings.routeAssistantModel || aiModelSettings.tripStarterModel ? 'Custom' : 'Default'}</span>
+            </div>
+            <div className="ai-settings-grid">
+              <label className="ai-setting-field" htmlFor="ai-route-model">
+                <span>Route editor model</span>
+                <input
+                  id="ai-route-model"
+                  list="ai-model-options"
+                  type="text"
+                  value={aiModelSettings.routeAssistantModel}
+                  onChange={(event) => updateAiModelSetting('routeAssistantModel', event.currentTarget.value)}
+                  placeholder="server default"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  maxLength={128}
+                />
+              </label>
+              <label className="ai-setting-field" htmlFor="ai-trip-model">
+                <span>New-trip model</span>
+                <input
+                  id="ai-trip-model"
+                  list="ai-model-options"
+                  type="text"
+                  value={aiModelSettings.tripStarterModel}
+                  onChange={(event) => updateAiModelSetting('tripStarterModel', event.currentTarget.value)}
+                  placeholder="server default"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  maxLength={128}
+                />
+              </label>
+            </div>
+            <datalist id="ai-model-options">
+              {openAIModels.map((model) => (
+                <option key={model.id} value={model.id} />
+              ))}
+            </datalist>
+          </section>
+
+          <section className="ai-settings-panel">
+            <div className="section-heading">
+              <h2>Available Models</h2>
+              <span>{openAIModels.length}</span>
+            </div>
+            {openAIModels.length ? (
+              <div className="ai-model-list">
+                {openAIModels.map((model) => (
+                  <article key={model.id} className="ai-model-row">
+                    <span>
+                      <strong>{model.id}</strong>
+                      <small>{model.ownedBy || 'owner unavailable'}</small>
+                    </span>
+                    <span className="ai-model-actions">
+                      <button
+                        type="button"
+                        className="icon-button ghost"
+                        onClick={() => updateAiModelSetting('routeAssistantModel', model.id)}
+                        title={`Use ${model.id} for route editor`}
+                        aria-label={`Use ${model.id} for route editor`}
+                      >
+                        <Route size={16} />
+                      </button>
+                      <button
+                        type="button"
+                        className="icon-button ghost"
+                        onClick={() => updateAiModelSetting('tripStarterModel', model.id)}
+                        title={`Use ${model.id} for new-trip generator`}
+                        aria-label={`Use ${model.id} for new-trip generator`}
+                      >
+                        <FilePlus2 size={16} />
+                      </button>
+                    </span>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <p className="empty-copy">{isLoadingOpenAIModels ? 'Loading models...' : 'No models loaded.'}</p>
             )}
           </section>
         </main>

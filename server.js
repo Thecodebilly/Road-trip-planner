@@ -17,11 +17,13 @@ const openaiReasoningEffortOptions = ['none', 'minimal', 'low', 'medium', 'high'
 const port = Number(process.env.PORT) || 3000;
 const databaseUrl = process.env.DATABASE_URL;
 const openaiToken = process.env.OPENAI_TOKEN || process.env.OPENAI_API_KEY;
-const openaiModel = process.env.OPENAI_MODEL || 'gpt-5.5';
+const openaiModel = process.env.OPENAI_MODEL || 'gpt-5';
 const openaiTripStarterModel = process.env.OPENAI_TRIP_STARTER_MODEL || openaiModel;
 const openaiReasoningEffort = normalizeOpenAIReasoningEffort(process.env.OPENAI_REASONING_EFFORT || 'high');
 const maxBodyBytes = 8 * 1024 * 1024;
 const maxRouteAssistantInstructionChars = 12000;
+const maxRouteAssistantContextMessages = 5;
+const maxRouteAssistantContextMessageChars = 2000;
 const aiRequestCooldownMs = 30 * 1000;
 const defaultWorkspaceId = 'workspace-default';
 const tripExportFormat = 'road-trip-planner.saved-trip.v1';
@@ -125,6 +127,24 @@ function normalizeOpenAIReasoningEffort(value) {
   if (!normalized || normalized === 'default' || normalized === 'auto' || normalized === 'off') return '';
 
   return openaiReasoningEffortOptions.includes(normalized) ? normalized : 'high';
+}
+
+function normalizeOpenAIModel(value) {
+  const model = String(value || '').trim();
+  return /^[A-Za-z0-9._:-]{1,128}$/.test(model) ? model : '';
+}
+
+function normalizeOpenAIModelList(payload) {
+  if (!Array.isArray(payload?.data)) return [];
+
+  return payload.data
+    .map((model) => ({
+      id: normalizeOpenAIModel(model?.id),
+      ownedBy: typeof model?.owned_by === 'string' ? model.owned_by : '',
+      created: Number.isFinite(Number(model?.created)) ? Number(model.created) : 0,
+    }))
+    .filter((model) => model.id)
+    .sort((first, second) => first.id.localeCompare(second.id));
 }
 
 function normalizeMaxCarLegHours(value) {
@@ -496,12 +516,12 @@ function makeLockedStop(stop, order) {
   };
 }
 
+function getRemoteWorkStops(trip) {
+  return trip.stops.filter((stop) => stop.remoteWork && isDateOnly(stop.date));
+}
+
 function getRemoteWorkDates(trip) {
-  return new Set(
-    trip.stops
-      .filter((stop) => stop.remoteWork && isDateOnly(stop.date))
-      .map((stop) => stop.date),
-  );
+  return new Set(getRemoteWorkStops(trip).map((stop) => stop.date));
 }
 
 function compareDateOnly(first, second) {
@@ -526,6 +546,7 @@ function insertStopByDate(stops, stopToInsert) {
 
 function enforceRemoteWorkDates(originalTrip, proposedStops) {
   const remoteWorkDates = getRemoteWorkDates(originalTrip);
+
   if (!remoteWorkDates.size) {
     return proposedStops.map((stop) => ({ ...stop, remoteWork: false }));
   }
@@ -536,12 +557,12 @@ function enforceRemoteWorkDates(originalTrip, proposedStops) {
   }));
   const proposedDates = new Set(stops.filter((stop) => isDateOnly(stop.date)).map((stop) => stop.date));
 
-  originalTrip.stops
-    .filter((stop) => stop.remoteWork && isDateOnly(stop.date) && !proposedDates.has(stop.date))
+  getRemoteWorkStops(originalTrip)
+    .filter((stop) => !proposedDates.has(stop.date))
     .forEach((missingRemoteStop) => {
       stops = insertStopByDate(stops, {
         ...missingRemoteStop,
-        id: `${missingRemoteStop.id}-remote-lock`,
+        id: `${missingRemoteStop.id}-remote-date-lock`,
         remoteWork: true,
       });
       proposedDates.add(missingRemoteStop.date);
@@ -687,7 +708,7 @@ function buildRouteRevisionScope(instruction) {
     reconsiderWholeTrip: fullTripRework,
     optimizeWholeRoute: wholeRouteOptimization,
     guidance: fullTripRework
-      ? 'Treat this as permission to rethink the entire middle itinerary, not just the named stops. Keep only the locked anchors and hard constraints.'
+      ? 'Treat this as permission to rethink the entire middle itinerary, not just the named stops. Keep locked anchors, remote-work dates, and other hard constraints.'
       : wholeRouteOptimization
         ? 'Treat route efficiency as a primary goal for all unlocked middle car stops, not only newly added stops.'
         : 'Apply the requested edit while still checking the whole route for unnecessary added driving.',
@@ -853,10 +874,13 @@ function enforceRouteAssistantLocks(originalTrip, proposedTrip, instruction) {
   const lockedStops = hasDistinctEnd
     ? [makeLockedStop(lockedStart, 1), ...proposedMiddle, makeLockedStop(lockedEnd, proposedMiddle.length + 2)]
     : [makeLockedStop(lockedStart, 1), ...proposedMiddle];
-  const stops = enforceTravelModeRules(
+  const stops = enforceRemoteWorkDates(
     originalTrip,
-    enforceFriendStayRules(enforceRemoteWorkDates(originalTrip, lockedStops), allowedFriendStays),
-    instruction,
+    enforceTravelModeRules(
+      originalTrip,
+      enforceFriendStayRules(enforceRemoteWorkDates(originalTrip, lockedStops), allowedFriendStays),
+      instruction,
+    ),
   )
     .map((stop, index) => ({ ...stop, order: index + 1 }));
 
@@ -992,7 +1016,8 @@ function optimizeEditedDrivingStops(originalTrip, proposedTrip, instruction) {
   proposedTrip.stops.forEach((stop, proposedIndex) => {
     const isAnchor = proposedIndex === 0 || proposedIndex === lastProposedIndex;
     const isOriginalStop = Boolean(findOriginalStopMatch(stop, originalStops));
-    const shouldKeepInPlace = isAnchor || stop.travelMode !== 'car' || (!optimizeWholeRoute && isOriginalStop);
+    const shouldKeepInPlace =
+      isAnchor || stop.travelMode !== 'car' || (!optimizeWholeRoute && isOriginalStop);
     const record = { stop, proposedIndex };
 
     if (shouldKeepInPlace) {
@@ -1247,6 +1272,24 @@ function checkAiRequestRateLimit(response, error = 'AI_RATE_LIMITED') {
   return true;
 }
 
+function normalizeRouteAssistantContextMessages(value) {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((message) => {
+      if (!message || typeof message !== 'object') return null;
+      const role = message.role === 'user' || message.role === 'assistant' ? message.role : '';
+      const content =
+        typeof message.content === 'string'
+          ? message.content.trim().slice(0, maxRouteAssistantContextMessageChars)
+          : '';
+
+      return role && content ? { role, content } : null;
+    })
+    .filter(Boolean)
+    .slice(-maxRouteAssistantContextMessages);
+}
+
 function buildOpenAIResponseBody(payload) {
   return {
     ...payload,
@@ -1255,6 +1298,32 @@ function buildOpenAIResponseBody(payload) {
 }
 
 async function handleApi(request, response, url) {
+  if (request.method === 'GET' && url.pathname === '/api/openai-models') {
+    if (!openaiToken) {
+      sendJson(response, 503, { error: 'OPENAI_NOT_CONFIGURED' });
+      return;
+    }
+
+    const openaiResponse = await fetch('https://api.openai.com/v1/models', {
+      headers: {
+        authorization: `Bearer ${openaiToken}`,
+        accept: 'application/json',
+      },
+    });
+
+    if (!openaiResponse.ok) {
+      const errorText = await openaiResponse.text();
+      console.error('OpenAI models list failed:', errorText);
+      sendJson(response, 502, { error: 'OPENAI_MODELS_REQUEST_FAILED' });
+      return;
+    }
+
+    sendJson(response, 200, {
+      models: normalizeOpenAIModelList(await openaiResponse.json()),
+    });
+    return;
+  }
+
   if (request.method === 'POST' && url.pathname === '/api/trip-starter') {
     if (!openaiToken) {
       sendJson(response, 503, { error: 'OPENAI_NOT_CONFIGURED' });
@@ -1264,6 +1333,7 @@ async function handleApi(request, response, url) {
     const body = await readJsonBody(request);
     const instruction = typeof body.instruction === 'string' ? body.instruction.trim() : '';
     const maxOneDayCarDriveHours = normalizeMaxCarLegHours(body.settings?.maxCarLegHours);
+    const requestOpenAIModel = normalizeOpenAIModel(body.settings?.model) || openaiTripStarterModel;
 
     if (!instruction || instruction.length > maxRouteAssistantInstructionChars) {
       sendJson(response, 400, { error: 'INVALID_TRIP_STARTER_REQUEST' });
@@ -1285,7 +1355,7 @@ async function handleApi(request, response, url) {
         'content-type': 'application/json',
       },
       body: JSON.stringify(buildOpenAIResponseBody({
-        model: openaiTripStarterModel,
+        model: requestOpenAIModel,
         instructions: [
           'You are a road-trip planner creating the first draft of a new trip from a long user prompt.',
           'Return only the requested structured JSON.',
@@ -1367,6 +1437,8 @@ async function handleApi(request, response, url) {
     const body = await readJsonBody(request);
     const instruction = typeof body.instruction === 'string' ? body.instruction.trim() : '';
     const trip = normalizeTrip(body.trip);
+    const contextMessages = normalizeRouteAssistantContextMessages(body.contextMessages);
+    const requestOpenAIModel = normalizeOpenAIModel(body.settings?.model) || openaiModel;
 
     if (!instruction || instruction.length > maxRouteAssistantInstructionChars || !trip) {
       sendJson(response, 400, { error: 'INVALID_ROUTE_ASSISTANT_REQUEST' });
@@ -1385,14 +1457,15 @@ async function handleApi(request, response, url) {
         'content-type': 'application/json',
       },
       body: JSON.stringify(buildOpenAIResponseBody({
-        model: openaiModel,
+        model: requestOpenAIModel,
         instructions: [
           'You are a route-planning assistant for a road-trip planner.',
           'Return only the requested structured JSON.',
-          'Revise the supplied trip according to the user request. You may add, remove, reorder, rename, or adjust stops.',
+          'Use recentContextMessages only as short follow-up context for the user intent. The current instruction, current trip, locked anchors, and hard constraints override older context.',
+          'Revise the supplied trip according to the user request. You may add, remove, reorder, rename, or adjust unlocked stops.',
           'If the request says to redo, rework, replan, rebuild, reroute, start over, make a fresh plan, or otherwise rethink the trip, treat it as a full-trip rework. Reconsider every unlocked middle stop, date, and driving leg instead of making a narrow local patch.',
           'Plan the itinerary for a passenger car using public roads by default. Do not add non-car travel unless the user explicitly asks for it or the supplied trip already has a non-car leg.',
-          'After applying the requested edit, optimize the ordered stops to minimize total passenger-car driving miles and time for the full itinerary, including stops the user did not explicitly name when they affect route efficiency.',
+          'After applying the requested edit, optimize the ordered stops to minimize total passenger-car driving miles and time for the full itinerary, including unlocked stops the user did not explicitly name when they affect route efficiency.',
           'Evaluate route efficiency at the whole-trip level before finalizing: avoid zigzags, long backtracking legs, and placements that look efficient locally but make the next legs worse.',
           'When adding stops, do not append them by default. Compare multiple placements and choose where each stop adds the least practical driving, unless the user requested a specific before/after/between placement.',
           'If the shortest driving order conflicts with a requested date, event, stop sequence, remote-work date, friend stay, non-car leg, or locked anchor, keep the requested constraint and mention the tradeoff in the summary.',
@@ -1409,9 +1482,11 @@ async function handleApi(request, response, url) {
           'The first and last stops are locked anchors. Keep them as the first and last stops with the same date, label, latitude, and longitude.',
           'The locked start/end date range cannot change. Keep all dated stops inside that inclusive range when both dates are known.',
           'If the user asks to change a locked start/end date or location, ignore that part and explain in the summary that those anchors stayed locked.',
-          'Remote-work dates are locked. Keep the exact same calendar dates marked remoteWork=true as the input trip, do not add new remoteWork dates, and do not remove existing remoteWork dates.',
+          'Remote-work dates are locked, but the stops on those dates are not locked. Keep the exact same calendar dates marked remoteWork=true as the input trip.',
+          'You may edit, rename, move, reorder, replace, add, or remove stops around remote-work dates, but do not move the remoteWork=true marker to a different date.',
+          'Do not add new remoteWork dates or remove existing remoteWork dates. If the user asks to change the remote-work calendar dates, ignore that part and explain in the summary that remote-work dates stayed locked.',
           'For targeted edits, preserve useful existing dates, notes, sleeping arrangements, friend names, and stops unless the user asks to change them.',
-          'For full-trip reworks or route-efficiency requests, do not preserve middle stops or their order just because they already exist. Keep only stops that still make sense after optimizing the whole unlocked route.',
+          'For full-trip reworks or route-efficiency requests, do not preserve unlocked middle stops or their order just because they already exist. Keep only unlocked stops that still make sense after optimizing the whole route.',
           'Use approximate latitude and longitude for well-known places when adding stops.',
           'Every stop must have order starting at 1, a human-readable label, numeric lat/lng, notes, date, remoteWork, sleepingArrangement, friendName, and travelMode.',
           'sleepingArrangement must be camping, hotel, or friend. Never invent a friend stay or friendName.',
@@ -1422,6 +1497,7 @@ async function handleApi(request, response, url) {
         ].join(' '),
         input: JSON.stringify({
           instruction,
+          recentContextMessages: contextMessages,
           revisionScope,
           lockedAnchors,
           drivingPlanningContext,
