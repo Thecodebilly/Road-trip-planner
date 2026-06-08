@@ -16,7 +16,7 @@ A small React + TypeScript + Vite web app that visualizes a USA road trip itiner
    ```env
    VITE_GOOGLE_MAPS_API_KEY=your_api_key_here
    ```
-4. Optionally add a Postgres connection string to persist saved trips outside the browser:
+4. Optionally add a Postgres connection string to persist workspaces and saved trips outside the browser:
    ```env
    DATABASE_URL=postgresql://user:password@host:5432/database
    ```
@@ -32,7 +32,7 @@ A small React + TypeScript + Vite web app that visualizes a USA road trip itiner
    npm run dev
    ```
 
-To test database-backed saved trips locally, build and run the production server:
+To test database-backed workspaces and saved trips locally, build and run the production server:
 ```bash
 npm run build
 npm start
@@ -52,6 +52,6 @@ npm start
    - Build: `npm run build`
    - Start: `npm run start`
 
-The server creates a `saved_trips` table automatically when `DATABASE_URL` is configured. If the database is not configured or unavailable, saved trips fall back to browser storage.
+The server creates `workspaces` and `saved_trips` tables automatically when `DATABASE_URL` is configured. If the database is not configured or unavailable, workspaces and saved trips fall back to browser storage.
 
 > Do not commit real API keys. Keep them in local `.env` files and Railway environment variables.

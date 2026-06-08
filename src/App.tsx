@@ -746,13 +746,16 @@ function readWorkspaces() {
       : [];
     const workspaceById = new Map<string, Workspace>();
 
-    [defaultWorkspace, ...workspaces].forEach((workspace) => {
+    workspaces.forEach((workspace) => {
       if (!workspaceById.has(workspace.id)) {
         workspaceById.set(workspace.id, workspace);
       }
     });
 
-    return [...workspaceById.values()];
+    const savedDefaultWorkspace = workspaceById.get(defaultWorkspaceId);
+    workspaceById.delete(defaultWorkspaceId);
+
+    return [savedDefaultWorkspace || defaultWorkspace, ...workspaceById.values()];
   } catch {
     return [defaultWorkspace];
   }
@@ -923,6 +926,88 @@ function setCachedValue<T>(storageKey: string, key: string, value: T, maxEntries
   writeStorage(storageKey, nextRecords);
 }
 
+function sortWorkspaces(workspaces: Workspace[]) {
+  return [...workspaces].sort((a, b) => {
+    if (a.id === defaultWorkspaceId) return -1;
+    if (b.id === defaultWorkspaceId) return 1;
+
+    return b.updatedAt.localeCompare(a.updatedAt) || a.name.localeCompare(b.name);
+  });
+}
+
+function isRecoveredWorkspace(workspace: Workspace) {
+  return workspace.name.startsWith('Recovered workspace');
+}
+
+function mergeWorkspacesByFreshness(...workspaceGroups: Workspace[][]) {
+  const workspacesById = new Map<string, Workspace>();
+  const candidateWorkspaces = workspaceGroups.flat();
+  const workspacesWithDefault = candidateWorkspaces.some((workspace) => workspace.id === defaultWorkspaceId)
+    ? candidateWorkspaces
+    : [createDefaultWorkspace(), ...candidateWorkspaces];
+
+  workspacesWithDefault.forEach((workspace) => {
+    const normalizedWorkspace = normalizeWorkspace(workspace);
+    if (!normalizedWorkspace) return;
+
+    const existingWorkspace = workspacesById.get(normalizedWorkspace.id);
+    if (existingWorkspace && isRecoveredWorkspace(normalizedWorkspace) && !isRecoveredWorkspace(existingWorkspace)) {
+      return;
+    }
+
+    if (
+      !existingWorkspace ||
+      (isRecoveredWorkspace(existingWorkspace) && !isRecoveredWorkspace(normalizedWorkspace)) ||
+      normalizedWorkspace.updatedAt.localeCompare(existingWorkspace.updatedAt) > 0
+    ) {
+      workspacesById.set(normalizedWorkspace.id, normalizedWorkspace);
+    }
+  });
+
+  return sortWorkspaces([...workspacesById.values()]);
+}
+
+function createRecoveredWorkspaceFromTrip(trip: Trip): Workspace {
+  const now = new Date().toISOString();
+  const suffix = trip.workspaceId.replace(/^workspace-/, '').slice(0, 8);
+
+  return {
+    id: trip.workspaceId,
+    name: trip.workspaceId === defaultWorkspaceId
+      ? 'Main workspace'
+      : `Recovered workspace${suffix ? ` ${suffix}` : ''}`,
+    createdAt: trip.createdAt || now,
+    updatedAt: trip.updatedAt || now,
+  };
+}
+
+function addMissingWorkspacesFromTrips(workspaces: Workspace[], trips: Trip[]) {
+  const workspacesById = new Map(workspaces.map((workspace) => [workspace.id, workspace]));
+
+  trips.forEach((trip) => {
+    if (workspacesById.has(trip.workspaceId)) return;
+    workspacesById.set(trip.workspaceId, createRecoveredWorkspaceFromTrip(trip));
+  });
+
+  return sortWorkspaces([...workspacesById.values()]);
+}
+
+function workspacesMatch(first: Workspace[], second: Workspace[]) {
+  if (first.length !== second.length) return false;
+
+  return first.every((workspace, index) => {
+    const otherWorkspace = second[index];
+
+    return (
+      otherWorkspace &&
+      workspace.id === otherWorkspace.id &&
+      workspace.name === otherWorkspace.name &&
+      workspace.createdAt === otherWorkspace.createdAt &&
+      workspace.updatedAt === otherWorkspace.updatedAt
+    );
+  });
+}
+
 function sortTripsByUpdatedAt(trips: Trip[]) {
   return [...trips].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
 }
@@ -945,6 +1030,54 @@ function mergeTripsByFreshness(...tripGroups: Trip[][]) {
 
 function filterTripsForWorkspace(trips: Trip[], workspaceId: string) {
   return sortTripsByUpdatedAt(trips.filter((trip) => trip.workspaceId === workspaceId));
+}
+
+async function fetchWorkspacesFromDatabase() {
+  const response = await fetch('/api/workspaces', {
+    headers: { accept: 'application/json' },
+  });
+
+  if (!response.ok) {
+    throw new Error(`GET_WORKSPACES_${response.status}`);
+  }
+
+  const workspaces = await response.json();
+  if (!Array.isArray(workspaces)) {
+    throw new Error('INVALID_WORKSPACES_RESPONSE');
+  }
+
+  return sortWorkspaces(
+    workspaces
+      .map((workspace) => normalizeWorkspace(workspace))
+      .filter((workspace): workspace is Workspace => Boolean(workspace)),
+  );
+}
+
+async function saveWorkspaceToDatabase(workspace: Workspace) {
+  const normalizedWorkspace = normalizeWorkspace(workspace);
+  if (!normalizedWorkspace) {
+    throw new Error('INVALID_WORKSPACE');
+  }
+
+  const response = await fetch(`/api/workspaces/${encodeURIComponent(normalizedWorkspace.id)}`, {
+    method: 'PUT',
+    headers: {
+      accept: 'application/json',
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify(normalizedWorkspace),
+  });
+
+  if (!response.ok) {
+    throw new Error(`SAVE_WORKSPACE_${response.status}`);
+  }
+
+  const savedWorkspace = normalizeWorkspace(await response.json());
+  if (!savedWorkspace) {
+    throw new Error('INVALID_SAVED_WORKSPACE_RESPONSE');
+  }
+
+  return savedWorkspace;
 }
 
 async function fetchSavedTripsFromDatabase() {
@@ -2865,8 +2998,37 @@ function App() {
   }, [workspaces]);
 
   useEffect(() => {
+    let canceled = false;
+
+    fetchWorkspacesFromDatabase()
+      .then((databaseWorkspaces) => {
+        if (canceled) return;
+
+        setWorkspaces((currentWorkspaces) => {
+          const nextWorkspaces = mergeWorkspacesByFreshness(databaseWorkspaces, currentWorkspaces);
+          return workspacesMatch(currentWorkspaces, nextWorkspaces) ? currentWorkspaces : nextWorkspaces;
+        });
+      })
+      .catch(() => {
+        // Browser storage remains the source of truth when the database is unavailable.
+      });
+
+    return () => {
+      canceled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     writeStorage(activeWorkspaceKey, activeWorkspaceId);
   }, [activeWorkspaceId]);
+
+  useEffect(() => {
+    if (saveBackend !== 'database') return;
+
+    void Promise.all(workspaces.map((workspace) => saveWorkspaceToDatabase(workspace))).catch(() => {
+      // Trip saving can still continue locally if workspace metadata cannot be persisted.
+    });
+  }, [saveBackend, workspaces]);
 
   useEffect(() => {
     let canceled = false;
@@ -2888,6 +3050,10 @@ function App() {
 
         if (canceled) return;
 
+        setWorkspaces((currentWorkspaces) => {
+          const nextWorkspaces = addMissingWorkspacesFromTrips(currentWorkspaces, databaseTrips);
+          return workspacesMatch(currentWorkspaces, nextWorkspaces) ? currentWorkspaces : nextWorkspaces;
+        });
         setSavedTrips(mergedTrips);
         setSaveBackend('database');
         removeWorkspaceSavedTrips(activeWorkspaceId);
@@ -3989,6 +4155,9 @@ function App() {
     const newTrip = createBlankTrip(workspace.id, `${name} trip`);
 
     setWorkspaces((currentWorkspaces) => [workspace, ...currentWorkspaces]);
+    void saveWorkspaceToDatabase(workspace).catch(() => {
+      // The normal local-storage fallback and later database sync still cover this workspace.
+    });
     setWorkspaceNameDraft('');
     setActiveWorkspaceId(workspace.id);
     setSavedTrips([]);

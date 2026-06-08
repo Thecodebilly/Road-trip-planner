@@ -206,6 +206,17 @@ const databaseReady = pool
       CREATE INDEX IF NOT EXISTS saved_trips_updated_at_idx
         ON saved_trips (updated_at DESC);
 
+      CREATE TABLE IF NOT EXISTS workspaces (
+        id text PRIMARY KEY,
+        workspace jsonb NOT NULL,
+        updated_at timestamptz NOT NULL DEFAULT now(),
+        created_at timestamptz NOT NULL DEFAULT now(),
+        CONSTRAINT workspaces_workspace_object CHECK (jsonb_typeof(workspace) = 'object')
+      );
+
+      CREATE INDEX IF NOT EXISTS workspaces_updated_at_idx
+        ON workspaces (updated_at DESC);
+
       CREATE TABLE IF NOT EXISTS shared_trips (
         id text PRIMARY KEY,
         export jsonb NOT NULL,
@@ -308,6 +319,21 @@ function normalizeTrip(value) {
     remoteWorkDates,
     stops,
     documents,
+    createdAt: typeof value.createdAt === 'string' ? value.createdAt : now,
+    updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : now,
+  };
+}
+
+function normalizeWorkspace(value) {
+  if (!value || typeof value !== 'object') return null;
+
+  const now = new Date().toISOString();
+  const name = typeof value.name === 'string' ? value.name.trim() : '';
+  if (!name) return null;
+
+  return {
+    id: typeof value.id === 'string' && value.id ? value.id : `workspace-${Date.now()}`,
+    name,
     createdAt: typeof value.createdAt === 'string' ? value.createdAt : now,
     updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : now,
   };
@@ -1730,6 +1756,56 @@ async function handleApi(request, response, url) {
     return;
   }
 
+  if (request.method === 'GET' && url.pathname === '/api/workspaces') {
+    if (!(await requireDatabase(response))) return;
+
+    const result = await pool.query('SELECT workspace FROM workspaces ORDER BY updated_at DESC');
+    sendJson(
+      response,
+      200,
+      result.rows
+        .map((row) => normalizeWorkspace(row.workspace))
+        .filter(Boolean),
+    );
+    return;
+  }
+
+  const workspaceMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)$/);
+  if (workspaceMatch) {
+    if (request.method !== 'PUT') {
+      sendJson(response, 405, { error: 'METHOD_NOT_ALLOWED' });
+      return;
+    }
+
+    if (!(await requireDatabase(response))) return;
+
+    const workspaceId = decodeURIComponent(workspaceMatch[1]);
+    const workspace = normalizeWorkspace(await readJsonBody(request));
+    if (!workspace || workspace.id !== workspaceId) {
+      sendJson(response, 400, { error: 'INVALID_WORKSPACE' });
+      return;
+    }
+
+    const updatedAt = Number.isNaN(new Date(workspace.updatedAt).getTime())
+      ? new Date()
+      : new Date(workspace.updatedAt);
+
+    const result = await pool.query(
+      `
+        INSERT INTO workspaces (id, workspace, updated_at)
+        VALUES ($1, $2::jsonb, $3)
+        ON CONFLICT (id) DO UPDATE
+        SET workspace = EXCLUDED.workspace,
+            updated_at = EXCLUDED.updated_at
+        RETURNING workspace
+      `,
+      [workspace.id, JSON.stringify(workspace), updatedAt],
+    );
+
+    sendJson(response, 200, result.rows[0].workspace);
+    return;
+  }
+
   if (request.method === 'GET' && url.pathname === '/api/trips') {
     if (!(await requireDatabase(response))) return;
 
@@ -1859,7 +1935,7 @@ const server = http.createServer(async (request, response) => {
 server.listen(port, '0.0.0.0', () => {
   console.log(`Road Trip Planner listening on ${port}`);
   if (!pool) {
-    console.log('DATABASE_URL is not set; saved trips will use browser fallback storage.');
+    console.log('DATABASE_URL is not set; workspaces and saved trips will use browser fallback storage.');
   }
 });
 
