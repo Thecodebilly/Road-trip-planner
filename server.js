@@ -745,6 +745,31 @@ function instructionRequestsRouteEfficiency(instruction) {
   );
 }
 
+function instructionRequestsStartPointChange(instruction) {
+  return (
+    /\b(?:change|set|update|move|replace|switch|make)\s+(?:the\s+)?(?:start(?:ing)?(?:\s+(?:point|location|place|city|stop))?|origin|departure(?:\s+(?:point|location|place|city|stop))?)\b/i.test(
+      instruction,
+    ) ||
+    /\b(?:start|begin|depart|leave)\s+(?:the\s+trip\s+)?(?:from|in|at)\b/i.test(instruction)
+  );
+}
+
+function instructionRequestsEndPointChange(instruction) {
+  return (
+    /\b(?:change|set|update|move|replace|switch|make)\s+(?:the\s+)?(?:end(?:ing)?(?:\s+(?:point|location|place|city|stop))?|destination|finish(?:ing)?(?:\s+(?:point|location|place|city|stop))?|arrival(?:\s+(?:point|location|place|city|stop))?|final\s+stop|last\s+stop)\b/i.test(
+      instruction,
+    ) ||
+    /\b(?:end|finish|arrive)\s+(?:the\s+trip\s+)?(?:in|at)\b/i.test(instruction)
+  );
+}
+
+function buildAnchorChangePermissions(instruction) {
+  return {
+    startLocation: instructionRequestsStartPointChange(instruction),
+    endLocation: instructionRequestsEndPointChange(instruction),
+  };
+}
+
 function buildRouteRevisionScope(instruction) {
   const fullTripRework = instructionRequestsFullTripRework(instruction);
   const wholeRouteOptimization = fullTripRework || instructionRequestsRouteEfficiency(instruction);
@@ -874,7 +899,7 @@ function enforceFriendStayRules(stops, allowedFriendStays) {
   });
 }
 
-function buildRouteAssistantLocks(trip) {
+function buildRouteAssistantLocks(trip, anchorChangePermissions = buildAnchorChangePermissions('')) {
   const start = trip.stops[0];
   const end = trip.stops[trip.stops.length - 1];
 
@@ -893,6 +918,7 @@ function buildRouteAssistantLocks(trip) {
       lat: end.lat,
       lng: end.lng,
     },
+    editableAnchorLocations: anchorChangePermissions,
     dateRange: {
       startDate: start.date,
       endDate: end.date,
@@ -905,13 +931,36 @@ function buildRouteAssistantLocks(trip) {
   };
 }
 
+function buildAnchorStop(originalStop, proposedStop, order, allowLocationChange) {
+  const anchorStop = allowLocationChange && proposedStop
+    ? {
+        ...originalStop,
+        ...proposedStop,
+        id: originalStop.id,
+        order,
+        date: originalStop.date,
+      }
+    : makeLockedStop(originalStop, order);
+
+  return {
+    ...anchorStop,
+    order,
+    travelMode: order === 1 ? 'car' : normalizeTravelMode(anchorStop.travelMode),
+  };
+}
+
 function enforceRouteAssistantLocks(originalTrip, proposedTrip, instruction) {
+  const anchorChangePermissions = buildAnchorChangePermissions(instruction);
   const lockedStart = originalTrip.stops[0];
   const lockedEnd = originalTrip.stops[originalTrip.stops.length - 1];
   const hasDistinctEnd = originalTrip.stops.length > 1;
   const allowedFriendStays = getAllowedFriendStays(originalTrip);
+  const proposedStart = proposedTrip.stops[0];
+  const proposedEnd = hasDistinctEnd ? proposedTrip.stops[proposedTrip.stops.length - 1] : null;
   const proposedMiddle = proposedTrip.stops
-    .filter((stop) => {
+    .filter((stop, index) => {
+      if (anchorChangePermissions.startLocation && index === 0) return false;
+      if (anchorChangePermissions.endLocation && hasDistinctEnd && index === proposedTrip.stops.length - 1) return false;
       if (isSameLockedStop(stop, lockedStart)) return false;
       if (hasDistinctEnd && isSameLockedStop(stop, lockedEnd)) return false;
       return true;
@@ -921,9 +970,13 @@ function enforceRouteAssistantLocks(originalTrip, proposedTrip, instruction) {
       date: clampDateToRange(stop.date, lockedStart.date, lockedEnd.date),
     }));
 
+  const startStop = buildAnchorStop(lockedStart, proposedStart, 1, anchorChangePermissions.startLocation);
+  const endStop = hasDistinctEnd
+    ? buildAnchorStop(lockedEnd, proposedEnd, proposedMiddle.length + 2, anchorChangePermissions.endLocation)
+    : null;
   const lockedStops = hasDistinctEnd
-    ? [makeLockedStop(lockedStart, 1), ...proposedMiddle, makeLockedStop(lockedEnd, proposedMiddle.length + 2)]
-    : [makeLockedStop(lockedStart, 1), ...proposedMiddle];
+    ? [startStop, ...proposedMiddle, endStop]
+    : [startStop, ...proposedMiddle];
   const stops = enforceRemoteWorkDates(
     originalTrip,
     enforceTravelModeRules(
@@ -940,6 +993,33 @@ function enforceRouteAssistantLocks(originalTrip, proposedTrip, instruction) {
     remoteWorkDates: Array.from(getRemoteWorkDates(originalTrip)).sort(),
     stops,
   }) || proposedTrip;
+}
+
+function anchorLocationChanged(originalStop, updatedStop) {
+  if (!updatedStop) return false;
+
+  return (
+    normalizeStopIdentity(originalStop.label) !== normalizeStopIdentity(updatedStop.label) ||
+    calculatePointMiles(originalStop, updatedStop) > 1
+  );
+}
+
+function buildAnchorSummary(originalTrip, editedTrip, anchorChangePermissions) {
+  const startChanged =
+    anchorChangePermissions.startLocation && anchorLocationChanged(originalTrip.stops[0], editedTrip.stops[0]);
+  const endChanged =
+    anchorChangePermissions.endLocation &&
+    originalTrip.stops.length > 1 &&
+    anchorLocationChanged(originalTrip.stops[originalTrip.stops.length - 1], editedTrip.stops[editedTrip.stops.length - 1]);
+
+  if (startChanged && endChanged) return 'Requested start and end locations were updated; start/end dates stayed locked.';
+  if (startChanged) return 'Requested start location was updated; start/end dates stayed locked.';
+  if (endChanged) return 'Requested end location was updated; start/end dates stayed locked.';
+  if (anchorChangePermissions.startLocation || anchorChangePermissions.endLocation) {
+    return 'Start/end location changes were allowed when explicitly requested; start/end dates stayed locked.';
+  }
+
+  return 'Start/end dates and locations stayed locked.';
 }
 
 function normalizeStopIdentity(value) {
@@ -1497,7 +1577,8 @@ async function handleApi(request, response, url) {
       return;
     }
 
-    const lockedAnchors = buildRouteAssistantLocks(trip);
+    const anchorChangePermissions = buildAnchorChangePermissions(instruction);
+    const lockedAnchors = buildRouteAssistantLocks(trip, anchorChangePermissions);
     const maxOneDayCarDriveHours = normalizeMaxCarLegHours(body.settings?.maxCarLegHours);
     const revisionScope = buildRouteRevisionScope(instruction);
     const drivingPlanningContext = buildDrivingPlanningContext(trip, maxOneDayCarDriveHours, revisionScope);
@@ -1531,9 +1612,11 @@ async function handleApi(request, response, url) {
           `Two car-driving sessions on one date are allowed only when the middle stop is a real event, reservation, meetup, scenic stop, attraction, meal, or rest break, the middle stop notes explain that purpose, and total same-date car driving stays within ${maxOneDayCarDriveHours} hours.`,
           'Do not invent fake events solely to justify split driving. If a day would need multiple normal driving shifts, move one stop to another date or add an overnight stop instead.',
           'Do not create three or more car-driving sessions on one date. Avoid adding split-drive sessions on remote-work dates unless the supplied route already had that exact pattern.',
-          'The first and last stops are locked anchors. Keep them as the first and last stops with the same date, label, latitude, and longitude.',
-          'The locked start/end date range cannot change. Keep all dated stops inside that inclusive range when both dates are known.',
-          'If the user asks to change a locked start/end date or location, ignore that part and explain in the summary that those anchors stayed locked.',
+          'The first and last stops are route anchors and must remain the first and last stops.',
+          'The start/end dates and date range cannot change. Keep all dated stops inside that inclusive range when both dates are known.',
+          'Preserve the start location label, latitude, and longitude unless editableAnchorLocations.startLocation is true.',
+          'Preserve the end location label, latitude, and longitude unless editableAnchorLocations.endLocation is true.',
+          'If the user specifically asks to change the start or end point and the matching editableAnchorLocations flag is true, update only that anchor location while keeping its original date.',
           'Remote-work dates are locked, but the stops on those dates are not locked. Keep the exact same calendar dates marked remoteWork=true as the input trip.',
           'You may edit, rename, move, reorder, replace, add, or remove stops around remote-work dates, but do not move the remoteWork=true marker to a different date.',
           'Do not add new remoteWork dates or remove existing remoteWork dates. If the user asks to change the remote-work calendar dates, ignore that part and explain in the summary that remote-work dates stayed locked.',
@@ -1552,6 +1635,7 @@ async function handleApi(request, response, url) {
           instruction,
           recentContextMessages: contextMessages,
           revisionScope,
+          anchorChangePermissions,
           lockedAnchors,
           drivingPlanningContext,
           trip: getRouteAssistantTripInput(trip),
@@ -1587,6 +1671,7 @@ async function handleApi(request, response, url) {
 
     const anchoredTrip = enforceRouteAssistantLocks(trip, proposal.trip, instruction);
     const optimizedRoute = optimizeEditedDrivingStops(trip, anchoredTrip, instruction);
+    const anchorSummary = buildAnchorSummary(trip, optimizedRoute.trip, anchorChangePermissions);
     const travelSummary = instructionAllowsNonCarTravel(instruction, trip)
       ? 'Car-first planning stayed on, with requested non-car legs allowed.'
       : 'Planned for passenger-car driving.';
@@ -1599,7 +1684,7 @@ async function handleApi(request, response, url) {
         : 'Driving order was checked for a shorter route.';
 
     sendJson(response, 200, {
-      summary: `${proposal.summary} ${travelSummary} ${routeOptimizationSummary} Start/end date and locations stayed locked. Remote-work dates, friend stays, and split-driving days were kept constrained.`,
+      summary: `${proposal.summary} ${travelSummary} ${routeOptimizationSummary} ${anchorSummary} Remote-work dates, friend stays, and split-driving days were kept constrained.`,
       trip: optimizedRoute.trip,
     });
     return;

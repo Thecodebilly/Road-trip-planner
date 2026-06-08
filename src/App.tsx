@@ -4195,7 +4195,7 @@ function App() {
               id="route-assistant-prompt"
               value={routeAssistantPrompt}
               onChange={(event) => setRouteAssistantPrompt(event.currentTarget.value)}
-              placeholder="Add Denver by car, or mark a long leg as plane/boat; start/end stay locked"
+              placeholder="Add Denver by car, change start to Atlanta, or mark a long leg as plane/boat"
               rows={3}
               maxLength={routeAssistantPromptMaxLength}
             />
