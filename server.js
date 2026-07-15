@@ -334,6 +334,7 @@ function normalizeWorkspace(value) {
   return {
     id: typeof value.id === 'string' && value.id ? value.id : `workspace-${Date.now()}`,
     name,
+    defaultTripId: typeof value.defaultTripId === 'string' ? value.defaultTripId : '',
     createdAt: typeof value.createdAt === 'string' ? value.createdAt : now,
     updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : now,
   };
@@ -773,7 +774,7 @@ function instructionRequestsRouteEfficiency(instruction) {
 
 function instructionRequestsStartPointChange(instruction) {
   return (
-    /\b(?:change|set|update|move|replace|switch|make)\s+(?:the\s+)?(?:start(?:ing)?(?:\s+(?:point|location|place|city|stop))?|origin|departure(?:\s+(?:point|location|place|city|stop))?)\b/i.test(
+    /\b(?:change|set|update|move|replace|switch|make)\s+(?:the\s+)?(?:start(?:ing)?(?!\s*dates?\b)(?:\s+(?:point|location|place|city|stop))?|origin|departure(?:\s+(?:point|location|place|city|stop))?)\b/i.test(
       instruction,
     ) ||
     /\b(?:start|begin|depart|leave)\s+(?:the\s+trip\s+)?(?:from|in|at)\b/i.test(instruction)
@@ -782,10 +783,29 @@ function instructionRequestsStartPointChange(instruction) {
 
 function instructionRequestsEndPointChange(instruction) {
   return (
-    /\b(?:change|set|update|move|replace|switch|make)\s+(?:the\s+)?(?:end(?:ing)?(?:\s+(?:point|location|place|city|stop))?|destination|finish(?:ing)?(?:\s+(?:point|location|place|city|stop))?|arrival(?:\s+(?:point|location|place|city|stop))?|final\s+stop|last\s+stop)\b/i.test(
+    /\b(?:change|set|update|move|replace|switch|make)\s+(?:the\s+)?(?:end(?:ing)?(?!\s*dates?\b)(?:\s+(?:point|location|place|city|stop))?|destination|finish(?:ing)?(?!\s*dates?\b)(?:\s+(?:point|location|place|city|stop))?|arrival(?:\s+(?:point|location|place|city|stop))?|final\s+stop|last\s+stop)\b/i.test(
       instruction,
     ) ||
     /\b(?:end|finish|arrive)\s+(?:the\s+trip\s+)?(?:in|at)\b/i.test(instruction)
+  );
+}
+
+function instructionRequestsStartDateChange(instruction) {
+  return (
+    /\b(?:change|set|update|move|shift|push|make)\s+(?:the\s+)?(?:trip'?s?\s+)?(?:start(?:ing)?|departure|first)\s*dates?\b/i.test(
+      instruction,
+    ) ||
+    /\b(?:start|begin)\s+the\s+trip\s+on\b/i.test(instruction)
+  );
+}
+
+function instructionRequestsEndDateChange(instruction) {
+  return (
+    /\b(?:change|set|update|move|shift|push|make)\s+(?:the\s+)?(?:trip'?s?\s+)?(?:end(?:ing)?|finish(?:ing)?|final|last|return)\s*dates?\b/i.test(
+      instruction,
+    ) ||
+    /\b(?:end|finish)\s+the\s+trip\s+on\b/i.test(instruction) ||
+    /\b(?:extend|lengthen|shorten)\s+the\s+trip\s+(?:to|until|through|by)\b/i.test(instruction)
   );
 }
 
@@ -793,6 +813,8 @@ function buildAnchorChangePermissions(instruction) {
   return {
     startLocation: instructionRequestsStartPointChange(instruction),
     endLocation: instructionRequestsEndPointChange(instruction),
+    startDate: instructionRequestsStartDateChange(instruction),
+    endDate: instructionRequestsEndDateChange(instruction),
   };
 }
 
@@ -944,7 +966,14 @@ function buildRouteAssistantLocks(trip, anchorChangePermissions = buildAnchorCha
       lat: end.lat,
       lng: end.lng,
     },
-    editableAnchorLocations: anchorChangePermissions,
+    editableAnchorLocations: {
+      startLocation: anchorChangePermissions.startLocation,
+      endLocation: anchorChangePermissions.endLocation,
+    },
+    editableAnchorDates: {
+      startDate: anchorChangePermissions.startDate,
+      endDate: anchorChangePermissions.endDate,
+    },
     dateRange: {
       startDate: start.date,
       endDate: end.date,
@@ -957,19 +986,22 @@ function buildRouteAssistantLocks(trip, anchorChangePermissions = buildAnchorCha
   };
 }
 
-function buildAnchorStop(originalStop, proposedStop, order, allowLocationChange) {
+function buildAnchorStop(originalStop, proposedStop, order, allowLocationChange, allowDateChange = false) {
   const anchorStop = allowLocationChange && proposedStop
     ? {
         ...originalStop,
         ...proposedStop,
         id: originalStop.id,
         order,
-        date: originalStop.date,
       }
     : makeLockedStop(originalStop, order);
+  const date = allowDateChange && proposedStop && isDateOnly(proposedStop.date)
+    ? proposedStop.date
+    : originalStop.date;
 
   return {
     ...anchorStop,
+    date,
     order,
     travelMode: order === 1 ? 'car' : normalizeTravelMode(anchorStop.travelMode),
   };
@@ -983,23 +1015,43 @@ function enforceRouteAssistantLocks(originalTrip, proposedTrip, instruction) {
   const allowedFriendStays = getAllowedFriendStays(originalTrip);
   const proposedStart = proposedTrip.stops[0];
   const proposedEnd = hasDistinctEnd ? proposedTrip.stops[proposedTrip.stops.length - 1] : null;
+  const startStop = buildAnchorStop(
+    lockedStart,
+    proposedStart,
+    1,
+    anchorChangePermissions.startLocation,
+    anchorChangePermissions.startDate,
+  );
+  const endAnchor = hasDistinctEnd
+    ? buildAnchorStop(
+        lockedEnd,
+        proposedEnd,
+        2,
+        anchorChangePermissions.endLocation,
+        anchorChangePermissions.endDate,
+      )
+    : null;
+  const rangeEndDate = endAnchor ? endAnchor.date : lockedEnd.date;
   const proposedMiddle = proposedTrip.stops
     .filter((stop, index) => {
-      if (anchorChangePermissions.startLocation && index === 0) return false;
-      if (anchorChangePermissions.endLocation && hasDistinctEnd && index === proposedTrip.stops.length - 1) return false;
+      if ((anchorChangePermissions.startLocation || anchorChangePermissions.startDate) && index === 0) return false;
+      if (
+        (anchorChangePermissions.endLocation || anchorChangePermissions.endDate) &&
+        hasDistinctEnd &&
+        index === proposedTrip.stops.length - 1
+      ) {
+        return false;
+      }
       if (isSameLockedStop(stop, lockedStart)) return false;
       if (hasDistinctEnd && isSameLockedStop(stop, lockedEnd)) return false;
       return true;
     })
     .map((stop) => ({
       ...stop,
-      date: clampDateToRange(stop.date, lockedStart.date, lockedEnd.date),
+      date: clampDateToRange(stop.date, startStop.date, rangeEndDate),
     }));
 
-  const startStop = buildAnchorStop(lockedStart, proposedStart, 1, anchorChangePermissions.startLocation);
-  const endStop = hasDistinctEnd
-    ? buildAnchorStop(lockedEnd, proposedEnd, proposedMiddle.length + 2, anchorChangePermissions.endLocation)
-    : null;
+  const endStop = endAnchor ? { ...endAnchor, order: proposedMiddle.length + 2 } : null;
   const lockedStops = hasDistinctEnd
     ? [startStop, ...proposedMiddle, endStop]
     : [startStop, ...proposedMiddle];
@@ -1031,18 +1083,37 @@ function anchorLocationChanged(originalStop, updatedStop) {
 }
 
 function buildAnchorSummary(originalTrip, editedTrip, anchorChangePermissions) {
-  const startChanged =
-    anchorChangePermissions.startLocation && anchorLocationChanged(originalTrip.stops[0], editedTrip.stops[0]);
-  const endChanged =
-    anchorChangePermissions.endLocation &&
-    originalTrip.stops.length > 1 &&
-    anchorLocationChanged(originalTrip.stops[originalTrip.stops.length - 1], editedTrip.stops[editedTrip.stops.length - 1]);
+  const originalStart = originalTrip.stops[0];
+  const originalEnd = originalTrip.stops[originalTrip.stops.length - 1];
+  const editedStart = editedTrip.stops[0];
+  const editedEnd = editedTrip.stops[editedTrip.stops.length - 1];
+  const hasDistinctEnd = originalTrip.stops.length > 1;
+  const changes = [];
 
-  if (startChanged && endChanged) return 'Requested start and end locations were updated; start/end dates stayed locked.';
-  if (startChanged) return 'Requested start location was updated; start/end dates stayed locked.';
-  if (endChanged) return 'Requested end location was updated; start/end dates stayed locked.';
-  if (anchorChangePermissions.startLocation || anchorChangePermissions.endLocation) {
-    return 'Start/end location changes were allowed when explicitly requested; start/end dates stayed locked.';
+  if (anchorChangePermissions.startLocation && anchorLocationChanged(originalStart, editedStart)) {
+    changes.push('start location');
+  }
+  if (anchorChangePermissions.endLocation && hasDistinctEnd && anchorLocationChanged(originalEnd, editedEnd)) {
+    changes.push('end location');
+  }
+  if (anchorChangePermissions.startDate && editedStart && originalStart.date !== editedStart.date) {
+    changes.push('start date');
+  }
+  if (anchorChangePermissions.endDate && hasDistinctEnd && editedEnd && originalEnd.date !== editedEnd.date) {
+    changes.push('end date');
+  }
+
+  if (changes.length) {
+    return `Requested ${changes.join(' and ')} ${changes.length === 1 ? 'change was' : 'changes were'} applied; other start/end anchors stayed locked.`;
+  }
+
+  if (
+    anchorChangePermissions.startLocation ||
+    anchorChangePermissions.endLocation ||
+    anchorChangePermissions.startDate ||
+    anchorChangePermissions.endDate
+  ) {
+    return 'Explicitly requested anchor changes were allowed; start/end anchors otherwise stayed locked.';
   }
 
   return 'Start/end dates and locations stayed locked.';
@@ -1639,10 +1710,12 @@ async function handleApi(request, response, url) {
           'Do not invent fake events solely to justify split driving. If a day would need multiple normal driving shifts, move one stop to another date or add an overnight stop instead.',
           'Do not create three or more car-driving sessions on one date. Avoid adding split-drive sessions on remote-work dates unless the supplied route already had that exact pattern.',
           'The first and last stops are route anchors and must remain the first and last stops.',
-          'The start/end dates and date range cannot change. Keep all dated stops inside that inclusive range when both dates are known.',
+          'Preserve the trip start date unless editableAnchorDates.startDate is true, and preserve the trip end date unless editableAnchorDates.endDate is true. These are hard constraints.',
+          'Keep all dated stops inside the inclusive start/end date range when both dates are known, using the updated range if an anchor date was explicitly changed.',
+          'If the user specifically asks to change the start or end date and the matching editableAnchorDates flag is true, update that anchor date and reschedule unlocked stops so every dated stop still fits the new range.',
           'Preserve the start location label, latitude, and longitude unless editableAnchorLocations.startLocation is true.',
           'Preserve the end location label, latitude, and longitude unless editableAnchorLocations.endLocation is true.',
-          'If the user specifically asks to change the start or end point and the matching editableAnchorLocations flag is true, update only that anchor location while keeping its original date.',
+          'If the user specifically asks to change the start or end point and the matching editableAnchorLocations flag is true, update only that anchor location while keeping its date unless the matching editableAnchorDates flag is also true.',
           'Remote-work dates are locked, but the stops on those dates are not locked. Keep the exact same calendar dates marked remoteWork=true as the input trip.',
           'You may edit, rename, move, reorder, replace, add, or remove stops around remote-work dates, but do not move the remoteWork=true marker to a different date.',
           'Do not add new remoteWork dates or remove existing remoteWork dates. If the user asks to change the remote-work calendar dates, ignore that part and explain in the summary that remote-work dates stayed locked.',
@@ -1772,7 +1845,7 @@ async function handleApi(request, response, url) {
 
   const workspaceMatch = url.pathname.match(/^\/api\/workspaces\/([^/]+)$/);
   if (workspaceMatch) {
-    if (request.method !== 'PUT') {
+    if (request.method !== 'PUT' && request.method !== 'DELETE') {
       sendJson(response, 405, { error: 'METHOD_NOT_ALLOWED' });
       return;
     }
@@ -1780,6 +1853,19 @@ async function handleApi(request, response, url) {
     if (!(await requireDatabase(response))) return;
 
     const workspaceId = decodeURIComponent(workspaceMatch[1]);
+
+    if (request.method === 'DELETE') {
+      if (workspaceId === defaultWorkspaceId) {
+        sendJson(response, 403, { error: 'DEFAULT_WORKSPACE_PROTECTED' });
+        return;
+      }
+
+      await pool.query("DELETE FROM saved_trips WHERE trip->>'workspaceId' = $1", [workspaceId]);
+      await pool.query('DELETE FROM workspaces WHERE id = $1', [workspaceId]);
+      sendEmpty(response, 204);
+      return;
+    }
+
     const workspace = normalizeWorkspace(await readJsonBody(request));
     if (!workspace || workspace.id !== workspaceId) {
       sendJson(response, 400, { error: 'INVALID_WORKSPACE' });

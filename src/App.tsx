@@ -22,7 +22,10 @@ import {
   Eye,
   FilePlus2,
   FileText,
+  FolderCog,
   FolderOpen,
+  Fuel,
+  History,
   Import,
   LocateFixed,
   LoaderCircle,
@@ -37,6 +40,7 @@ import {
   Share2,
   Ship,
   Sparkles,
+  Star,
   Trash2,
   Upload,
   Wifi,
@@ -81,7 +85,7 @@ type MapStopGroup = {
   id: string;
   position: google.maps.LatLngLiteral;
   stops: TripStop[];
-  stopRangeLabel: string;
+  dayRangeLabel: string;
   dateRangeLabel: string;
   sleepingArrangement: SleepingArrangement | 'mixed';
   hasWeekend: boolean;
@@ -140,6 +144,7 @@ type TripDocument = {
 type Workspace = {
   id: string;
   name: string;
+  defaultTripId: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -192,8 +197,15 @@ type SharedTripResponse = {
 };
 
 type SaveBackend = 'checking' | 'database' | 'local';
-type AppView = 'editor' | 'saved' | 'ai';
+type AppView = 'editor' | 'saved' | 'ai' | 'workspaces';
 type NewTripMode = 'setup' | 'ai' | 'json';
+
+type LastAiEdit = {
+  kind: 'route-edit' | 'new-trip';
+  instruction: string;
+  summary: string;
+  at: string;
+};
 
 type NewTripDraft = {
   startDate: string;
@@ -278,6 +290,8 @@ const activeTripKey = 'road-trip-planner.activeTrip.v1';
 const workspacesKey = 'road-trip-planner.workspaces.v1';
 const activeWorkspaceKey = 'road-trip-planner.activeWorkspace.v1';
 const gasPriceKey = 'road-trip-planner.gasPrice.v1';
+const gasPriceScalingKey = 'road-trip-planner.gasPriceScaling.v1';
+const lastAiEditKey = 'road-trip-planner.lastAiEdit.v1';
 const fuelMpgKey = 'road-trip-planner.fuelMpg.v1';
 const maxCarLegHoursKey = 'road-trip-planner.maxCarLegHours.v1';
 const aiModelSettingsKey = 'road-trip-planner.aiModelSettings.v1';
@@ -293,6 +307,7 @@ const compactTripShareParam = 't';
 const legacyTripShareParam = 'trip';
 const sharePathPrefix = '/share/';
 const aiSettingsPath = '/AI';
+const workspacesPath = '/workspaces';
 const routeAssistantPromptMaxLength = 12000;
 const maxRouteAssistantContextMessages = 5;
 const maxStopsPerDirectionsRequest = 25;
@@ -323,6 +338,66 @@ const hotelRegionAverageNightlyRates: Record<HotelRegion, number> = {
   South: 135,
   Midwest: 125,
   West: 185,
+};
+// Broad statewide $/gal planning averages for gas price scaling; the flat gas price still applies when scaling is off.
+const stateAverageGasPrices: Record<string, number> = {
+  AL: 2.95,
+  AK: 4.35,
+  AZ: 3.45,
+  AR: 2.9,
+  CA: 4.75,
+  CO: 3.15,
+  CT: 3.45,
+  DE: 3.1,
+  DC: 3.35,
+  FL: 3.15,
+  GA: 3.0,
+  HI: 4.65,
+  ID: 3.45,
+  IL: 3.45,
+  IN: 3.2,
+  IA: 3.0,
+  KS: 2.95,
+  KY: 3.0,
+  LA: 2.9,
+  ME: 3.25,
+  MD: 3.2,
+  MA: 3.35,
+  MI: 3.25,
+  MN: 3.1,
+  MS: 2.85,
+  MO: 2.95,
+  MT: 3.35,
+  NE: 3.0,
+  NV: 4.05,
+  NH: 3.2,
+  NJ: 3.25,
+  NM: 3.05,
+  NY: 3.45,
+  NC: 3.05,
+  ND: 3.1,
+  OH: 3.1,
+  OK: 2.85,
+  OR: 3.95,
+  PA: 3.45,
+  RI: 3.3,
+  SC: 2.95,
+  SD: 3.1,
+  TN: 2.95,
+  TX: 2.9,
+  UT: 3.35,
+  VT: 3.3,
+  VA: 3.1,
+  WA: 4.25,
+  WV: 3.15,
+  WI: 3.05,
+  WY: 3.2,
+};
+const regionAverageGasPrices: Record<HotelRegion, number> = {
+  Northeast: 3.35,
+  South: 3.0,
+  Midwest: 3.1,
+  West: 3.95,
 };
 const stateHotelRegions: Record<string, HotelRegion> = {
   AL: 'South',
@@ -589,6 +664,7 @@ function normalizeWorkspace(candidate: Partial<Workspace> | null | undefined): W
   return {
     id: typeof candidate.id === 'string' && candidate.id ? candidate.id : makeId('workspace'),
     name,
+    defaultTripId: typeof candidate.defaultTripId === 'string' ? candidate.defaultTripId : '',
     createdAt: typeof candidate.createdAt === 'string' ? candidate.createdAt : now,
     updatedAt: typeof candidate.updatedAt === 'string' ? candidate.updatedAt : now,
   };
@@ -600,6 +676,7 @@ function createDefaultWorkspace(): Workspace {
   return {
     id: defaultWorkspaceId,
     name: 'Main workspace',
+    defaultTripId: '',
     createdAt: now,
     updatedAt: now,
   };
@@ -805,9 +882,16 @@ function readSavedTrips(workspaceId = defaultWorkspaceId) {
   }
 }
 
-function createInitialTripForWorkspace(workspaceId: string) {
+function findWorkspaceDefaultTrip(workspace: Workspace | undefined, trips: Trip[]) {
+  if (!workspace?.defaultTripId) return null;
+
+  return trips.find((trip) => trip.id === workspace.defaultTripId) || null;
+}
+
+function createInitialTripForWorkspace(workspaceId: string, defaultTrip: Trip | null = null) {
   return (
     readActiveTrip(workspaceId) ||
+    defaultTrip ||
     (workspaceId === defaultWorkspaceId ? createDefaultTrip(workspaceId) : createBlankTrip(workspaceId))
   );
 }
@@ -815,12 +899,17 @@ function createInitialTripForWorkspace(workspaceId: string) {
 function getInitialWorkspaceSnapshot() {
   const workspaces = readWorkspaces();
   const activeWorkspaceId = readActiveWorkspaceId(workspaces);
+  const savedTrips = readSavedTrips(activeWorkspaceId);
+  const activeWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
 
   return {
     workspaces,
     activeWorkspaceId,
-    savedTrips: readSavedTrips(activeWorkspaceId),
-    activeTrip: createInitialTripForWorkspace(activeWorkspaceId),
+    savedTrips,
+    activeTrip: createInitialTripForWorkspace(
+      activeWorkspaceId,
+      findWorkspaceDefaultTrip(activeWorkspace, savedTrips),
+    ),
   };
 }
 
@@ -874,6 +963,40 @@ function readNumberStorage(key: string, fallback: number, minimum = 0) {
     return Number.isFinite(parsed) && parsed >= minimum ? parsed : fallback;
   } catch {
     return fallback;
+  }
+}
+
+function readBooleanStorage(key: string, fallback = false) {
+  try {
+    const saved = window.localStorage.getItem(key);
+
+    return saved ? Boolean(JSON.parse(saved)) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function normalizeLastAiEdit(value: unknown): LastAiEdit | null {
+  if (!value || typeof value !== 'object') return null;
+
+  const candidate = value as Partial<LastAiEdit>;
+  if (typeof candidate.summary !== 'string' || !candidate.summary.trim()) return null;
+
+  return {
+    kind: candidate.kind === 'new-trip' ? 'new-trip' : 'route-edit',
+    instruction: typeof candidate.instruction === 'string' ? candidate.instruction : '',
+    summary: candidate.summary,
+    at: typeof candidate.at === 'string' ? candidate.at : new Date().toISOString(),
+  };
+}
+
+function readLastAiEdit() {
+  try {
+    const saved = window.localStorage.getItem(lastAiEditKey);
+
+    return normalizeLastAiEdit(saved ? JSON.parse(saved) : null);
+  } catch {
+    return null;
   }
 }
 
@@ -976,6 +1099,7 @@ function createRecoveredWorkspaceFromTrip(trip: Trip): Workspace {
     name: trip.workspaceId === defaultWorkspaceId
       ? 'Main workspace'
       : `Recovered workspace${suffix ? ` ${suffix}` : ''}`,
+    defaultTripId: '',
     createdAt: trip.createdAt || now,
     updatedAt: trip.updatedAt || now,
   };
@@ -1002,6 +1126,7 @@ function workspacesMatch(first: Workspace[], second: Workspace[]) {
       otherWorkspace &&
       workspace.id === otherWorkspace.id &&
       workspace.name === otherWorkspace.name &&
+      workspace.defaultTripId === otherWorkspace.defaultTripId &&
       workspace.createdAt === otherWorkspace.createdAt &&
       workspace.updatedAt === otherWorkspace.updatedAt
     );
@@ -1078,6 +1203,16 @@ async function saveWorkspaceToDatabase(workspace: Workspace) {
   }
 
   return savedWorkspace;
+}
+
+async function deleteWorkspaceFromDatabase(workspaceId: string) {
+  const response = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}`, {
+    method: 'DELETE',
+  });
+
+  if (!response.ok) {
+    throw new Error(`DELETE_WORKSPACE_${response.status}`);
+  }
 }
 
 async function fetchSavedTripsFromDatabase() {
@@ -1541,12 +1676,18 @@ function isAiSettingsPath() {
   return window.location.pathname.toLowerCase() === aiSettingsPath.toLowerCase();
 }
 
-function getInitialAppView(): AppView {
-  return isAiSettingsPath() ? 'ai' : 'editor';
+function isWorkspacesPath() {
+  return window.location.pathname.toLowerCase() === workspacesPath.toLowerCase();
 }
 
-function clearAiSettingsUrl(replace = false) {
-  if (!isAiSettingsPath()) return;
+function getInitialAppView(): AppView {
+  if (isAiSettingsPath()) return 'ai';
+  if (isWorkspacesPath()) return 'workspaces';
+  return 'editor';
+}
+
+function clearAppViewPath(replace = false) {
+  if (!isAiSettingsPath() && !isWorkspacesPath()) return;
 
   if (replace) {
     window.history.replaceState(null, '', '/');
@@ -1850,7 +1991,10 @@ function formatDocumentLocation(document: TripDocument, stops: TripStop[]) {
   if (!document.linkedStopId) return 'Whole trip';
 
   const stop = stops.find((candidate) => candidate.id === document.linkedStopId);
-  return stop ? `Stop ${stop.order}: ${stop.label}` : 'Whole trip';
+  if (!stop) return 'Whole trip';
+
+  const dayNumber = getStopDayNumber(stop, stops);
+  return dayNumber === null ? stop.label : `Day ${dayNumber}: ${stop.label}`;
 }
 
 function downloadTripDocument(document: TripDocument) {
@@ -1885,6 +2029,31 @@ async function copyText(value: string) {
   textarea.select();
   document.execCommand('copy');
   textarea.remove();
+}
+
+function getTripStartDate(stops: TripStop[]) {
+  const dates = stops.map((stop) => stop.date).filter(isDateOnly).sort();
+
+  return dates[0] || '';
+}
+
+function getStopDayNumber(stop: Pick<TripStop, 'date'>, stops: TripStop[]) {
+  const startDate = getTripStartDate(stops);
+  if (!startDate || !isDateOnly(stop.date)) return null;
+
+  return Math.round((getDateOnlyTime(stop.date) - getDateOnlyTime(startDate)) / 86400000) + 1;
+}
+
+function formatStopDayLabel(stop: TripStop, stops: TripStop[]) {
+  const dayNumber = getStopDayNumber(stop, stops);
+
+  return dayNumber === null ? 'Unscheduled' : `Day ${dayNumber}`;
+}
+
+function formatStopDayBadge(stop: TripStop, stops: TripStop[]) {
+  const dayNumber = getStopDayNumber(stop, stops);
+
+  return dayNumber === null ? '–' : String(dayNumber);
 }
 
 function formatDate(date: string) {
@@ -1950,16 +2119,22 @@ function formatMapDateRange(stops: TripStop[]) {
   return `${firstMonth} ${firstDay}-${lastMonth} ${lastDay}`;
 }
 
-function formatMapStopRange(stops: TripStop[]) {
-  const orders = Array.from(new Set(stops.map((stop) => stop.order))).sort((first, second) => first - second);
-  if (!orders.length) return '';
+function formatMapDayRange(groupStops: TripStop[], allStops: TripStop[]) {
+  const dayNumbers = Array.from(
+    new Set(
+      groupStops
+        .map((stop) => getStopDayNumber(stop, allStops))
+        .filter((dayNumber): dayNumber is number => dayNumber !== null),
+    ),
+  ).sort((first, second) => first - second);
+  if (!dayNumbers.length) return '';
 
-  const first = orders[0];
-  const last = orders[orders.length - 1];
-  const isConsecutive = orders.every((order, index) => index === 0 || order === orders[index - 1] + 1);
+  const first = dayNumbers[0];
+  const last = dayNumbers[dayNumbers.length - 1];
+  const isConsecutive = dayNumbers.every((dayNumber, index) => index === 0 || dayNumber === dayNumbers[index - 1] + 1);
 
   if (first === last) return String(first);
-  return isConsecutive ? `${first}-${last}` : orders.join(', ');
+  return isConsecutive ? `${first}-${last}` : dayNumbers.join(', ');
 }
 
 function formatMapGroupHeading(stops: TripStop[]) {
@@ -2224,13 +2399,15 @@ function formatTravelLegSummary(
   driveEstimate: DriveEstimate | undefined,
   gasPrice: number,
   fuelMpg: number,
+  scaleGasPriceByStop = false,
 ) {
   if (stopIndex === 0) return 'Starting point';
 
   if (stop.travelMode === 'car') {
-    if (driveEstimate) return formatDriveSummary(driveEstimate, gasPrice, fuelMpg);
-
     const previous = stops[stopIndex - 1];
+    const legGasPrice = scaleGasPriceByStop && previous ? getLegGasPrice(previous, stop) : gasPrice;
+    if (driveEstimate) return formatDriveSummary(driveEstimate, legGasPrice, fuelMpg);
+
     const distanceMiles = previous ? estimateRoadMiles(previous, stop) : 0;
     return formatDriveSummary(
       {
@@ -2240,7 +2417,7 @@ function formatTravelLegSummary(
         durationMinutes: estimateDriveMinutes(distanceMiles),
         source: 'estimated',
       },
-      gasPrice,
+      legGasPrice,
       fuelMpg,
     );
   }
@@ -2405,6 +2582,42 @@ function getHotelAverageNightlyRate(stop: TripStop) {
   return hotelRegionAverageNightlyRates[getHotelRegion(stop)];
 }
 
+function getStopGasPrice(stop: Pick<TripStop, 'label' | 'lat' | 'lng'>) {
+  const state = extractStateAbbreviation(stop.label);
+  if (state && state in stateAverageGasPrices) return stateAverageGasPrices[state];
+
+  return regionAverageGasPrices[getHotelRegion(stop)];
+}
+
+function getLegGasPrice(fromStop: TripStop, toStop: TripStop) {
+  return (getStopGasPrice(fromStop) + getStopGasPrice(toStop)) / 2;
+}
+
+function formatGasPricePerGallon(value: number) {
+  return `$${value.toFixed(2)}/gal`;
+}
+
+function calculateTripGasCost(
+  stops: TripStop[],
+  driveEstimates: DriveEstimate[],
+  totalMiles: number,
+  gasPrice: number,
+  fuelMpg: number,
+  scaleGasPriceByStop: boolean,
+) {
+  if (!scaleGasPriceByStop) return calculateGasCost(totalMiles, gasPrice, fuelMpg);
+
+  const stopById = new Map(stops.map((stop) => [stop.id, stop]));
+
+  return driveEstimates.reduce((total, estimate) => {
+    const fromStop = stopById.get(estimate.fromStopId);
+    const toStop = stopById.get(estimate.toStopId);
+    const legGasPrice = fromStop && toStop ? getLegGasPrice(fromStop, toStop) : gasPrice;
+
+    return total + calculateGasCost(estimate.distanceMiles, legGasPrice, fuelMpg);
+  }, 0);
+}
+
 function parseStopDate(date: string) {
   if (!date) return null;
 
@@ -2500,7 +2713,7 @@ function groupMapStops(stops: TripStop[]): MapStopGroup[] {
       id: `${key}:${sortedStops.map((stop) => stop.id).join('-')}`,
       position: { lat: firstStop.lat, lng: firstStop.lng },
       stops: sortedStops,
-      stopRangeLabel: formatMapStopRange(sortedStops),
+      dayRangeLabel: formatMapDayRange(sortedStops, stops),
       dateRangeLabel: formatMapDateRange(sortedStops),
       sleepingArrangement: sleepingArrangements.length === 1 ? sleepingArrangements[0] : 'mixed',
       hasWeekend: sortedStops.some((stop) => isWeekendDate(stop.date)),
@@ -2848,6 +3061,7 @@ function App() {
   const documentUploadStopIdRef = useRef('');
   const shareImportHandledRef = useRef(false);
   const savedRouteUrlIdRef = useRef(getSavedRouteIdFromUrl());
+  const pendingDefaultTripRef = useRef<{ workspaceId: string; tripId: string } | null>(null);
   const initialWorkspaceSnapshotRef = useRef<ReturnType<typeof getInitialWorkspaceSnapshot> | null>(null);
   if (!initialWorkspaceSnapshotRef.current) {
     initialWorkspaceSnapshotRef.current = getInitialWorkspaceSnapshot();
@@ -2898,6 +3112,9 @@ function App() {
   const [roadDriveEstimates, setRoadDriveEstimates] = useState<DriveEstimate[] | null>(null);
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
   const [gasPrice, setGasPrice] = useState(() => readNumberStorage(gasPriceKey, defaultGasPrice));
+  const [gasPriceScaling, setGasPriceScaling] = useState(() => readBooleanStorage(gasPriceScalingKey));
+  const [lastAiEdit, setLastAiEdit] = useState<LastAiEdit | null>(() => readLastAiEdit());
+  const [showLastAiEdit, setShowLastAiEdit] = useState(false);
   const [fuelMpg, setFuelMpg] = useState(() => readNumberStorage(fuelMpgKey, defaultFuelMpg, 0.01));
   const [maxCarLegHours, setMaxCarLegHours] = useState(() =>
     clampMaxCarLegHours(readNumberStorage(maxCarLegHoursKey, defaultMaxCarLegHours, 1)),
@@ -2940,10 +3157,13 @@ function App() {
   const hasRoadDriveEstimates = Boolean(roadDriveEstimates?.some((estimate) => estimate.source === 'road'));
   const displayMiles = drivingMiles ?? sumDriveMiles(estimatedDriveEstimates);
   const displayDriveMinutes = sumDriveMinutes(driveEstimates);
-  const gasCost = calculateGasCost(displayMiles, gasPrice, fuelMpg);
+  const gasCost = useMemo(
+    () => calculateTripGasCost(stops, driveEstimates, displayMiles, gasPrice, fuelMpg, gasPriceScaling),
+    [displayMiles, driveEstimates, fuelMpg, gasPrice, gasPriceScaling, stops],
+  );
   const lodgingCost = useMemo(() => calculateLodgingCost(stops), [stops]);
   const nonCarTravelCost = useMemo(() => calculateNonCarTravelCost(stops), [stops]);
-  const displayGasCost = formatGasCost(displayMiles, gasPrice, fuelMpg);
+  const displayGasCost = formatCurrency(gasCost);
   const displayLodgingCost = formatCurrency(lodgingCost);
   const displayNonCarTravelCost = formatCurrency(nonCarTravelCost);
   const displayTripTotal = formatCurrency(gasCost + lodgingCost + nonCarTravelCost);
@@ -2972,8 +3192,9 @@ function App() {
       driveEstimateByStopId.get(selectedStop.id),
       gasPrice,
       fuelMpg,
+      gasPriceScaling,
     );
-  }, [driveEstimateByStopId, fuelMpg, gasPrice, selectedStop, selectedStopIndex, stops]);
+  }, [driveEstimateByStopId, fuelMpg, gasPrice, gasPriceScaling, selectedStop, selectedStopIndex, stops]);
   const selectedStopCarDayWarning = useMemo(() => {
     if (!selectedStop || selectedStopIndex < 0) return '';
 
@@ -2986,6 +3207,8 @@ function App() {
     );
   }, [driveEstimateByStopId, maxCarLegHours, selectedStop, selectedStopIndex, stops]);
   const dateRange = useMemo(() => formatStopDateRange(stops), [stops]);
+  const tripStartDate = stops[0]?.date || '';
+  const tripEndDate = stops.length > 1 ? stops[stops.length - 1]?.date || '' : '';
   const saveBackendLabel =
     saveBackend === 'database' ? 'DB' : saveBackend === 'local' ? 'Local' : 'Sync';
   const previewJson = useMemo(
@@ -3060,6 +3283,22 @@ function App() {
         if (localTrips.length) {
           setSaveMessage('Synced saved trips to database');
         }
+
+        const pendingDefaultTrip = pendingDefaultTripRef.current;
+        if (pendingDefaultTrip && pendingDefaultTrip.workspaceId === activeWorkspaceId) {
+          pendingDefaultTripRef.current = null;
+
+          const defaultTrip = mergedTrips.find((trip) => trip.id === pendingDefaultTrip.tripId);
+          if (defaultTrip) {
+            setDrivingMiles(null);
+            setRoadDriveEstimates(null);
+            setRouteAssistantContextMessages([]);
+            setActiveTrip(defaultTrip);
+            setSelectedStopId(defaultTrip.stops[0]?.id || null);
+            setSelectedDocumentId(defaultTrip.documents[0]?.id || null);
+            setFitSignal((value) => value + 1);
+          }
+        }
       })
       .catch(() => {
         if (canceled) return;
@@ -3081,6 +3320,10 @@ function App() {
   useEffect(() => {
     writeStorage(gasPriceKey, gasPrice);
   }, [gasPrice]);
+
+  useEffect(() => {
+    writeStorage(gasPriceScalingKey, gasPriceScaling);
+  }, [gasPriceScaling]);
 
   useEffect(() => {
     writeStorage(fuelMpgKey, fuelMpg);
@@ -3119,6 +3362,19 @@ function App() {
     window.addEventListener('keydown', closeOnEscape);
     return () => window.removeEventListener('keydown', closeOnEscape);
   }, [showImportModal]);
+
+  useEffect(() => {
+    if (!showLastAiEdit) return undefined;
+
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setShowLastAiEdit(false);
+      }
+    };
+
+    window.addEventListener('keydown', closeOnEscape);
+    return () => window.removeEventListener('keydown', closeOnEscape);
+  }, [showLastAiEdit]);
 
   useEffect(() => {
     if (!showNewTripModal) return undefined;
@@ -3178,7 +3434,7 @@ function App() {
       setActiveTrip(sharedTrip);
       setSelectedStopId(sharedTrip.stops[0]?.id || null);
       setSelectedDocumentId(null);
-      clearAiSettingsUrl(true);
+      clearAppViewPath(true);
       setCurrentView('editor');
       setSaveMessage(`Shared route loaded: ${sharedTrip.name}. Save it when ready.`);
       setFitSignal((value) => value + 1);
@@ -3188,6 +3444,18 @@ function App() {
       cancelled = true;
     };
   }, [activeWorkspaceId]);
+
+  const recordLastAiEdit = (kind: LastAiEdit['kind'], instruction: string, summary: string) => {
+    const nextLastAiEdit: LastAiEdit = {
+      kind,
+      instruction,
+      summary,
+      at: new Date().toISOString(),
+    };
+
+    setLastAiEdit(nextLastAiEdit);
+    writeStorage(lastAiEditKey, nextLastAiEdit);
+  };
 
   const touchTrip = (updater: (trip: Trip) => Trip) => {
     setDrivingMiles(null);
@@ -3263,6 +3531,12 @@ function App() {
     const nextValue = Number(value);
     if (!Number.isFinite(nextValue)) return;
     updateStop(stopId, { [field]: nextValue });
+  };
+
+  const updateTripAnchorDate = (anchor: 'start' | 'end', value: string) => {
+    const anchorStop = anchor === 'start' ? stops[0] : stops[stops.length - 1];
+    if (!anchorStop) return;
+    updateStop(anchorStop.id, { date: value });
   };
 
   const updateDocument = (documentId: string, updates: Partial<TripDocument>) => {
@@ -3602,7 +3876,7 @@ function App() {
       setSelectedStopId(importedTrip.stops[0]?.id || null);
       setSelectedDocumentId(importedTrip.documents[0]?.id || null);
       setSavedTrips(nextSavedTrips);
-      clearAiSettingsUrl(true);
+      clearAppViewPath(true);
       setCurrentView('editor');
       clearSavedRouteUrl(true);
       setFitSignal((value) => value + 1);
@@ -3691,12 +3965,13 @@ function App() {
       setActiveTrip(proposedTrip);
       setSelectedStopId(proposedTrip.stops[0]?.id || null);
       setSelectedDocumentId(proposedTrip.documents[0]?.id || null);
-      clearAiSettingsUrl(true);
+      clearAppViewPath(true);
       setCurrentView('editor');
       clearSavedRouteUrl(true);
       setFitSignal((value) => value + 1);
       setRouteAssistantPrompt('');
       setRouteAssistantMessage(`${result.summary} Save the draft when ready.`);
+      recordLastAiEdit('route-edit', instruction, result.summary);
       setRouteAssistantContextMessages((messages) =>
         trimRouteAssistantContext([
           ...messages,
@@ -3878,7 +4153,7 @@ function App() {
       setActiveTrip(newTrip);
       setSelectedStopId(newTrip.stops[0].id);
       setSelectedDocumentId(null);
-      clearAiSettingsUrl(true);
+      clearAppViewPath(true);
       setCurrentView('editor');
       setSaveMessage(
         start.resolved && end.resolved
@@ -3932,7 +4207,7 @@ function App() {
       setActiveTrip(generatedTrip);
       setSelectedStopId(generatedTrip.stops[0]?.id || null);
       setSelectedDocumentId(null);
-      clearAiSettingsUrl(true);
+      clearAppViewPath(true);
       setCurrentView('editor');
       setShowNewTripModal(false);
       setNewTripPrompt('');
@@ -3940,6 +4215,7 @@ function App() {
       clearSavedRouteUrl();
       setFitSignal((value) => value + 1);
       setSaveMessage(`${result.summary} Save the draft when ready.`);
+      recordLastAiEdit('new-trip', instruction, result.summary);
     } catch (error) {
       const message = error instanceof Error && error.message.includes('503')
         ? 'AI trip starter needs OPENAI_TOKEN on the server.'
@@ -3963,7 +4239,7 @@ function App() {
     setActiveTrip(nextTrip);
     setSelectedStopId(nextTrip.stops[0]?.id || null);
     setSelectedDocumentId(nextTrip.documents[0]?.id || null);
-    clearAiSettingsUrl(true);
+    clearAppViewPath(true);
     setCurrentView('editor');
     setSaveMessage(`Loaded ${nextTrip.name}`);
     if (syncUrl) {
@@ -4017,7 +4293,12 @@ function App() {
         return;
       }
 
-      setCurrentView((view) => (view === 'ai' ? 'editor' : view));
+      if (isWorkspacesPath()) {
+        setCurrentView('workspaces');
+        return;
+      }
+
+      setCurrentView((view) => (view === 'ai' || view === 'workspaces' ? 'editor' : view));
     };
 
     window.addEventListener('popstate', syncViewFromPath);
@@ -4031,14 +4312,21 @@ function App() {
   }, [currentView, hasLoadedOpenAIModels, isLoadingOpenAIModels]);
 
   const openEditor = () => {
-    clearAiSettingsUrl();
+    clearAppViewPath();
     setCurrentView('editor');
   };
 
   const openSavedTrips = () => {
-    clearAiSettingsUrl();
+    clearAppViewPath();
     clearSavedRouteUrl();
     setCurrentView('saved');
+  };
+
+  const openWorkspacesPage = () => {
+    if (!isWorkspacesPath()) {
+      window.history.pushState(null, '', workspacesPath);
+    }
+    setCurrentView('workspaces');
   };
 
   const updateAiModelDraft = (field: keyof AiModelSettings, value: string) => {
@@ -4092,6 +4380,15 @@ function App() {
     const nextSavedTrips = savedTrips.filter((trip) => trip.id !== tripId);
     const removedTrip = savedTrips.find((trip) => trip.id === tripId);
     setSavedTrips(nextSavedTrips);
+    setWorkspaces((currentWorkspaces) =>
+      currentWorkspaces.some((workspace) => workspace.defaultTripId === tripId)
+        ? currentWorkspaces.map((workspace) =>
+            workspace.defaultTripId === tripId
+              ? { ...workspace, defaultTripId: '', updatedAt: new Date().toISOString() }
+              : workspace,
+          )
+        : currentWorkspaces,
+    );
     if (
       removedTrip
         ? savedRouteTokenMatchesTrip(getSavedRouteIdFromUrl(), removedTrip)
@@ -4116,9 +4413,17 @@ function App() {
   };
 
   const loadWorkspace = (workspaceId: string) => {
-    if (!workspaces.some((workspace) => workspace.id === workspaceId)) return;
+    const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
+    if (!workspace) return;
 
-    const nextTrip = createInitialTripForWorkspace(workspaceId);
+    // A workspace default route pops up first; fall back to the last active trip while
+    // database-backed saved trips are still syncing, then swap once they arrive.
+    const defaultTrip = findWorkspaceDefaultTrip(workspace, readSavedTrips(workspaceId));
+    const nextTrip = defaultTrip || createInitialTripForWorkspace(workspaceId);
+    pendingDefaultTripRef.current =
+      workspace.defaultTripId && !defaultTrip
+        ? { workspaceId, tripId: workspace.defaultTripId }
+        : null;
 
     setActiveWorkspaceId(workspaceId);
     setSavedTrips(readSavedTrips(workspaceId));
@@ -4128,7 +4433,7 @@ function App() {
     setDrivingMiles(null);
     setRoadDriveEstimates(null);
     setRouteAssistantContextMessages([]);
-    clearAiSettingsUrl(true);
+    clearAppViewPath(true);
     setRouteAssistantPrompt('');
     setRouteAssistantMessage('');
     setNewTripPrompt('');
@@ -4137,6 +4442,50 @@ function App() {
     setSaveBackend('checking');
     clearSavedRouteUrl(true);
     setFitSignal((value) => value + 1);
+  };
+
+  const setWorkspaceDefaultTrip = (tripId: string) => {
+    const now = new Date().toISOString();
+    const isCurrentDefault = activeWorkspace.defaultTripId === tripId;
+    const tripName = savedTrips.find((trip) => trip.id === tripId)?.name || 'route';
+
+    setWorkspaces((currentWorkspaces) =>
+      currentWorkspaces.map((workspace) =>
+        workspace.id === activeWorkspace.id
+          ? { ...workspace, defaultTripId: isCurrentDefault ? '' : tripId, updatedAt: now }
+          : workspace,
+      ),
+    );
+    setSaveMessage(
+      isCurrentDefault
+        ? `Removed default route for ${activeWorkspace.name}`
+        : `${tripName} is now the default route for ${activeWorkspace.name}`,
+    );
+  };
+
+  const deleteWorkspace = async (workspaceId: string) => {
+    if (workspaceId === defaultWorkspaceId) return;
+
+    const workspace = workspaces.find((candidate) => candidate.id === workspaceId);
+    if (!workspace) return;
+    if (!window.confirm(`Delete workspace "${workspace.name}" and its saved trips? This cannot be undone.`)) {
+      return;
+    }
+
+    setWorkspaces((currentWorkspaces) => currentWorkspaces.filter((candidate) => candidate.id !== workspaceId));
+    removeStorage(workspaceStorageKey(activeTripKey, workspaceId));
+    removeStorage(workspaceStorageKey(savedTripsKey, workspaceId));
+
+    if (workspaceId === activeWorkspaceId) {
+      loadWorkspace(defaultWorkspaceId);
+    }
+
+    try {
+      await deleteWorkspaceFromDatabase(workspaceId);
+      setSaveMessage(`Workspace deleted: ${workspace.name}`);
+    } catch {
+      setSaveMessage(`Workspace removed locally: ${workspace.name}`);
+    }
   };
 
   const createWorkspace = (event: FormEvent<HTMLFormElement>) => {
@@ -4149,6 +4498,7 @@ function App() {
     const workspace: Workspace = {
       id: makeId('workspace'),
       name,
+      defaultTripId: '',
       createdAt: now,
       updatedAt: now,
     };
@@ -4167,7 +4517,7 @@ function App() {
     setDrivingMiles(null);
     setRoadDriveEstimates(null);
     setRouteAssistantContextMessages([]);
-    clearAiSettingsUrl(true);
+    clearAppViewPath(true);
     setCurrentView('editor');
     setRouteAssistantPrompt('');
     setRouteAssistantMessage('');
@@ -4242,6 +4592,15 @@ function App() {
             disabled={!workspaceNameDraft.trim()}
           >
             <Plus size={18} />
+          </button>
+          <button
+            type="button"
+            className={currentView === 'workspaces' ? 'icon-button active' : 'icon-button'}
+            onClick={openWorkspacesPage}
+            title="Manage workspaces"
+            aria-label="Manage workspaces"
+          >
+            <FolderCog size={18} />
           </button>
         </form>
 
@@ -4364,7 +4723,7 @@ function App() {
               id="route-assistant-prompt"
               value={routeAssistantPrompt}
               onChange={(event) => setRouteAssistantPrompt(event.currentTarget.value)}
-              placeholder="Add Denver by car, change start to Atlanta, or mark a long leg as plane/boat"
+              placeholder="Add Denver by car, change start to Atlanta, or change the end date to 2026-08-12"
               rows={3}
               maxLength={routeAssistantPromptMaxLength}
             />
@@ -4378,6 +4737,17 @@ function App() {
             </button>
           </form>
           {routeAssistantMessage && <p className="route-assistant-message">{routeAssistantMessage}</p>}
+          {lastAiEdit && (
+            <button
+              type="button"
+              className="icon-button"
+              onClick={() => setShowLastAiEdit(true)}
+              title="Show full text of the last AI edit"
+              aria-label="Show full text of the last AI edit"
+            >
+              <History size={18} />
+            </button>
+          )}
         </section>
 
       <div className="workspace">
@@ -4397,6 +4767,33 @@ function App() {
               onChange={(event) => updateTripField('notes', event.currentTarget.value)}
               rows={3}
             />
+
+            <div className="trip-date-grid" aria-label="Trip date range">
+              <span>
+                <label htmlFor="trip-start-date">Trip start date</label>
+                <input
+                  id="trip-start-date"
+                  type="date"
+                  value={tripStartDate}
+                  max={tripEndDate || undefined}
+                  onChange={(event) => updateTripAnchorDate('start', event.currentTarget.value)}
+                />
+              </span>
+              <span>
+                <label htmlFor="trip-end-date">Trip end date</label>
+                <input
+                  id="trip-end-date"
+                  type="date"
+                  value={tripEndDate}
+                  min={tripStartDate || undefined}
+                  onChange={(event) => updateTripAnchorDate('end', event.currentTarget.value)}
+                  disabled={stops.length < 2}
+                />
+              </span>
+            </div>
+            <p className="trip-date-hint">
+              AI route edits stay inside these dates unless you explicitly ask to change the start or end date.
+            </p>
 
             <div className="metric-grid">
               <div>
@@ -4455,6 +4852,8 @@ function App() {
                   step="0.05"
                   value={gasPrice}
                   onChange={(event) => updateGasPrice(event.currentTarget.value)}
+                  disabled={gasPriceScaling}
+                  title={gasPriceScaling ? 'Gas price scaling uses average prices near each stop' : undefined}
                 />
               </span>
               <span>
@@ -4539,6 +4938,20 @@ function App() {
               )}
             </div>
 
+            <label className="toggle-row gas-scaling-toggle" htmlFor="gas-price-scaling">
+              <input
+                id="gas-price-scaling"
+                type="checkbox"
+                checked={gasPriceScaling}
+                onChange={(event) => setGasPriceScaling(event.currentTarget.checked)}
+              />
+              <span>
+                <strong>Gas price scaling</strong>
+                <small>Price each leg with the average gas price near its stops</small>
+              </span>
+              <Fuel size={18} />
+            </label>
+
             <label className="toggle-row hotel-finder-toggle" htmlFor="hotel-finder">
               <input
                 id="hotel-finder"
@@ -4610,6 +5023,7 @@ function App() {
                   driveEstimate,
                   gasPrice,
                   fuelMpg,
+                  gasPriceScaling,
                 );
                 const carDayWarning = getCarLegDayWarning(stop, stopIndex, stops, driveEstimate, maxCarLegHours);
                 const stopIsWeekend = isWeekendDate(stop.date);
@@ -4632,8 +5046,11 @@ function App() {
                       className={stopCardClassName}
                       onClick={() => setSelectedStopId(stop.id)}
                     >
-                      <span className={`stop-index ${getSleepClass(stop.sleepingArrangement)}`}>
-                        {stop.order}
+                      <span
+                        className={`stop-index ${getSleepClass(stop.sleepingArrangement)}`}
+                        title={formatStopDayLabel(stop, stops)}
+                      >
+                        {formatStopDayBadge(stop, stops)}
                       </span>
                       <span className="stop-copy">
                         <strong>{stop.label}</strong>
@@ -4771,7 +5188,7 @@ function App() {
             </span>
             <span>
               <h2>Stop Details</h2>
-              <p>{selectedStop ? `Stop ${selectedStop.order}` : 'No stop selected'}</p>
+              <p>{selectedStop ? formatStopDayLabel(selectedStop, stops) : 'No stop selected'}</p>
             </span>
           </div>
 
@@ -4820,6 +5237,11 @@ function App() {
                     ? ' Planning estimate added to the trip total.'
                     : ''}
                 </p>
+                {gasPriceScaling && (
+                  <p className="travel-hint">
+                    Avg gas near this stop: {formatGasPricePerGallon(getStopGasPrice(selectedStop))}
+                  </p>
+                )}
                 {selectedStopCarDayWarning && <p className="travel-warning">{selectedStopCarDayWarning}</p>}
               </div>
 
@@ -4968,7 +5390,7 @@ function App() {
                 <option value="">Whole trip</option>
                 {stops.map((stop) => (
                   <option key={stop.id} value={stop.id}>
-                    {`Stop ${stop.order}: ${stop.label}`}
+                    {`${formatStopDayLabel(stop, stops)}: ${stop.label}`}
                   </option>
                 ))}
               </select>
@@ -5065,6 +5487,12 @@ function App() {
                           <strong>{trip.name}</strong>
                           <small>{formatStopDateRange(trip.stops)}</small>
                           <small>{`${trip.stops.length} stops | Updated ${formatDateTime(trip.updatedAt)}`}</small>
+                          {activeWorkspace.defaultTripId === trip.id && (
+                            <small className="default-route-tag">
+                              <Star size={13} />
+                              Default route for {activeWorkspace.name}
+                            </small>
+                          )}
                         </span>
                       </button>
                       <span className="saved-actions">
@@ -5075,6 +5503,28 @@ function App() {
                         >
                           <FolderOpen size={16} />
                           <span>Edit</span>
+                        </button>
+                        <button
+                          type="button"
+                          className={
+                            activeWorkspace.defaultTripId === trip.id
+                              ? 'icon-button ghost default-route-star active'
+                              : 'icon-button ghost default-route-star'
+                          }
+                          onClick={() => setWorkspaceDefaultTrip(trip.id)}
+                          title={
+                            activeWorkspace.defaultTripId === trip.id
+                              ? 'Remove as default route for this workspace'
+                              : 'Make default route for this workspace'
+                          }
+                          aria-label={
+                            activeWorkspace.defaultTripId === trip.id
+                              ? `Remove ${trip.name} as default route`
+                              : `Make ${trip.name} the default route`
+                          }
+                          aria-pressed={activeWorkspace.defaultTripId === trip.id}
+                        >
+                          <Star size={16} />
                         </button>
                         <button
                           type="button"
@@ -5141,6 +5591,79 @@ function App() {
                 </pre>
               </aside>
             )}
+          </section>
+        </main>
+      ) : currentView === 'workspaces' ? (
+        <main className="saved-page workspaces-page" aria-label="Workspaces page">
+          <section className="saved-page-header">
+            <span>
+              <h2>Workspaces</h2>
+              <p>
+                {saveBackend === 'database' ? 'Database-backed workspaces' : 'Locally stored workspaces'} |{' '}
+                {workspaces.length} total
+              </p>
+            </span>
+            <div className="saved-page-actions">
+              <button type="button" className="primary-button" onClick={openEditor}>
+                <Route size={17} />
+                <span>Open editor</span>
+              </button>
+            </div>
+          </section>
+
+          <section className="saved-page-grid">
+            <div className="saved-library">
+              <div className="section-heading">
+                <h2>All Workspaces</h2>
+                <span>{workspaces.length}</span>
+              </div>
+              <div className="saved-list saved-list-page">
+                {workspaces.map((workspace) => (
+                  <article key={workspace.id} className="saved-card saved-card-page">
+                    <button
+                      type="button"
+                      className="saved-main"
+                      onClick={() => {
+                        loadWorkspace(workspace.id);
+                        openEditor();
+                      }}
+                      title={`Open ${workspace.name}`}
+                    >
+                      <FolderOpen size={18} />
+                      <span>
+                        <strong>{workspace.name}</strong>
+                        <small>{`Updated ${formatDateTime(workspace.updatedAt)}`}</small>
+                        <span className="stop-tags">
+                          {workspace.id === defaultWorkspaceId && (
+                            <span className="stop-tag sleep-camping">Main workspace</span>
+                          )}
+                          {workspace.id === activeWorkspaceId && <span className="stop-tag travel">Active</span>}
+                          {workspace.defaultTripId && <span className="stop-tag sleep-hotel">Default route set</span>}
+                        </span>
+                      </span>
+                    </button>
+                    <span className="saved-actions">
+                      {workspace.id === defaultWorkspaceId ? (
+                        <span className="workspace-protected-note">Cannot be deleted</span>
+                      ) : (
+                        <button
+                          type="button"
+                          className="icon-button ghost danger"
+                          onClick={() => deleteWorkspace(workspace.id)}
+                          title={`Delete ${workspace.name}`}
+                          aria-label={`Delete workspace ${workspace.name}`}
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      )}
+                    </span>
+                  </article>
+                ))}
+              </div>
+              <p className="empty-copy">
+                Deleting a workspace removes its saved trips. The main workspace can never be deleted.
+              </p>
+            </div>
           </section>
         </main>
       ) : (
@@ -5554,6 +6077,56 @@ function App() {
           </section>
         </div>
       )}
+
+      {showLastAiEdit && lastAiEdit && (
+        <div className="json-modal-backdrop" role="presentation" onClick={() => setShowLastAiEdit(false)}>
+          <section
+            className="json-modal ai-edit-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="ai-edit-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <header className="json-modal-header">
+              <span>
+                <h2 id="ai-edit-title">Last AI Edit</h2>
+                <p>
+                  {lastAiEdit.kind === 'new-trip' ? 'New trip' : 'Route edit'} | {formatDateTime(lastAiEdit.at)}
+                </p>
+              </span>
+              <button
+                type="button"
+                className="icon-button"
+                onClick={() => setShowLastAiEdit(false)}
+                title="Close last AI edit"
+                aria-label="Close last AI edit"
+              >
+                <X size={18} />
+              </button>
+            </header>
+            <div className="ai-edit-body">
+              {lastAiEdit.instruction && (
+                <>
+                  <h3>Your request</h3>
+                  <p className="ai-edit-text">{lastAiEdit.instruction}</p>
+                </>
+              )}
+              <h3>What the AI did</h3>
+              <p className="ai-edit-text">{lastAiEdit.summary}</p>
+            </div>
+            <footer className="json-modal-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() => void copyText(lastAiEdit.summary).catch(() => undefined)}
+              >
+                <Copy size={17} />
+                <span>Copy text</span>
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
     </div>
   );
 }
@@ -5568,7 +6141,7 @@ function escapeHtml(value: string) {
 }
 
 function createOpenMapStopIcon(group: MapStopGroup, selected: boolean) {
-  const markerLabel = group.stopRangeLabel || String(group.stops[0].order);
+  const markerLabel = group.dayRangeLabel || '–';
   const className = [
     'map-stop-marker',
     getSleepClass(group.sleepingArrangement),
@@ -6143,7 +6716,7 @@ function MapCanvas({
 
       {mapStopGroups.map((group) => {
         const selectedInGroup = group.stops.some((stop) => stop.id === selectedStopId);
-        const markerLabel = group.stopRangeLabel || String(group.stops[0].order);
+        const markerLabel = group.dayRangeLabel || '–';
         const className = [
           'map-stop-marker',
           getSleepClass(group.sleepingArrangement),
@@ -6175,13 +6748,13 @@ function MapCanvas({
               }}
               title={
                 group.stops.length > 1
-                  ? `Stops ${group.stopRangeLabel}: ${heading} (${group.dateRangeLabel})`
+                  ? `Days ${group.dayRangeLabel}: ${heading} (${group.dateRangeLabel})`
                   : `${heading}: ${group.dateRangeLabel}`
               }
               aria-label={
                 group.stops.length > 1
-                  ? `Stops ${group.stopRangeLabel}, ${group.dateRangeLabel}, ${group.stops.length} stops at ${heading}`
-                  : `Stop ${group.stops[0].order}, ${heading}`
+                  ? `Days ${group.dayRangeLabel}, ${group.dateRangeLabel}, ${group.stops.length} stops at ${heading}`
+                  : `${formatStopDayLabel(group.stops[0], stops)}, ${heading}`
               }
             >
               <span>{markerLabel}</span>
@@ -6256,7 +6829,7 @@ function MapCanvas({
           <div className="info-window">
             <p>
               {selectedMapGroup.stops.length > 1
-                ? `Stops ${selectedMapGroup.stopRangeLabel} | ${selectedMapGroup.dateRangeLabel}`
+                ? `Days ${selectedMapGroup.dayRangeLabel} | ${selectedMapGroup.dateRangeLabel}`
                 : selectedMapGroup.dateRangeLabel}
             </p>
             <h2>{formatMapGroupHeading(selectedMapGroup.stops)}</h2>
