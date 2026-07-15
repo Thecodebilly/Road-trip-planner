@@ -92,6 +92,15 @@ type MapStopGroup = {
   hasRemoteWork: boolean;
 };
 
+type MapMarkerLabelMode = 'day' | 'date';
+
+type GasLegSegment = {
+  fromStopId: string;
+  toStopId: string;
+  path: google.maps.LatLngLiteral[];
+  gasPrice: number;
+};
+
 type HotelSearchPoint = {
   id: string;
   label: string;
@@ -106,6 +115,7 @@ type HotelCandidate = {
   userRatingsTotal: number | null;
   priceLevel: google.maps.places.PriceLevel | null;
   vicinity: string;
+  website: string;
   searchLabel: string;
   distanceFromSearchMiles: number;
   score: number;
@@ -275,6 +285,8 @@ type MapCanvasProps = {
   fitSignal: number;
   isPlacingPin: boolean;
   showHotelFinder: boolean;
+  gasPriceScaling: boolean;
+  markerLabelMode: MapMarkerLabelMode;
   onSelectStop: (stopId: string | null) => void;
   onPlacePin: (position: google.maps.LatLngLiteral) => void;
   onRouteDistanceChange: (miles: number | null) => void;
@@ -282,6 +294,7 @@ type MapCanvasProps = {
 };
 
 const mapContainerStyle = { width: '100%', height: '100%' };
+const defaultRouteColor = '#0f766e';
 const centerOverlay = (width: number, height: number) => ({ x: -(width / 2), y: -(height / 2) });
 const googleMapsLibraries: Libraries = ['places'];
 const usCenter = { lat: 39.8283, lng: -98.5795 };
@@ -291,6 +304,7 @@ const workspacesKey = 'road-trip-planner.workspaces.v1';
 const activeWorkspaceKey = 'road-trip-planner.activeWorkspace.v1';
 const gasPriceKey = 'road-trip-planner.gasPrice.v1';
 const gasPriceScalingKey = 'road-trip-planner.gasPriceScaling.v1';
+const mapMarkerLabelModeKey = 'road-trip-planner.mapMarkerLabelMode.v1';
 const lastAiEditKey = 'road-trip-planner.lastAiEdit.v1';
 const fuelMpgKey = 'road-trip-planner.fuelMpg.v1';
 const maxCarLegHoursKey = 'road-trip-planner.maxCarLegHours.v1';
@@ -2144,6 +2158,30 @@ function formatMapGroupHeading(stops: TripStop[]) {
   return `${labels[0]} + ${labels.length - 1} more`;
 }
 
+function normalizeMapMarkerLabelMode(value: unknown): MapMarkerLabelMode {
+  return value === 'date' ? 'date' : 'day';
+}
+
+function readMapMarkerLabelMode(): MapMarkerLabelMode {
+  try {
+    const saved = window.localStorage.getItem(mapMarkerLabelModeKey);
+
+    return normalizeMapMarkerLabelMode(saved ? JSON.parse(saved) : null);
+  } catch {
+    return 'day';
+  }
+}
+
+function getMapMarkerLabel(group: MapStopGroup, markerLabelMode: MapMarkerLabelMode) {
+  if (markerLabelMode === 'date') {
+    const hasDates = group.stops.some((stop) => isDateOnly(stop.date));
+
+    return hasDates ? group.dateRangeLabel : '–';
+  }
+
+  return group.dayRangeLabel || '–';
+}
+
 function formatStopDateRange(stops: TripStop[]) {
   if (!stops.length) return 'No stops';
 
@@ -2593,6 +2631,108 @@ function getLegGasPrice(fromStop: TripStop, toStop: TripStop) {
   return (getStopGasPrice(fromStop) + getStopGasPrice(toStop)) / 2;
 }
 
+function getCarLegGasPrices(stops: TripStop[]) {
+  const prices: number[] = [];
+
+  for (let index = 1; index < stops.length; index += 1) {
+    if (stops[index].travelMode !== 'car') continue;
+    prices.push(getLegGasPrice(stops[index - 1], stops[index]));
+  }
+
+  return prices;
+}
+
+function createGasPriceColor(minPrice: number, maxPrice: number) {
+  return (price: number) => {
+    if (!Number.isFinite(price)) return defaultRouteColor;
+
+    const spread = maxPrice - minPrice;
+    const ratio = spread < 0.005 ? 0.5 : (maxPrice - price) / spread;
+
+    return `hsl(${Math.round(ratio * 120)}, 82%, 40%)`;
+  };
+}
+
+function buildStraightGasLegSegments(stops: TripStop[]): GasLegSegment[] {
+  const segments: GasLegSegment[] = [];
+
+  for (let index = 1; index < stops.length; index += 1) {
+    const from = stops[index - 1];
+    const to = stops[index];
+
+    segments.push({
+      fromStopId: from.id,
+      toStopId: to.id,
+      path: [
+        { lat: from.lat, lng: from.lng },
+        { lat: to.lat, lng: to.lng },
+      ],
+      gasPrice: to.travelMode === 'car' ? getLegGasPrice(from, to) : Number.NaN,
+    });
+  }
+
+  return segments;
+}
+
+function findNearestRoutePathIndex(routePath: google.maps.LatLngLiteral[], position: google.maps.LatLngLiteral) {
+  let index = 0;
+  let miles = Number.POSITIVE_INFINITY;
+
+  routePath.forEach((point, pointIndex) => {
+    const pointMiles = calculatePointMiles(point, position);
+    if (pointMiles < miles) {
+      miles = pointMiles;
+      index = pointIndex;
+    }
+  });
+
+  return { index, miles };
+}
+
+// Road paths come back per directions chunk, not per leg, so slice each car leg out of
+// the nearest chunk path; fall back to a straight segment when no slice matches.
+function buildRoadGasLegSegments(
+  routePaths: google.maps.LatLngLiteral[][],
+  stops: TripStop[],
+): GasLegSegment[] {
+  const segments: GasLegSegment[] = [];
+
+  for (let index = 1; index < stops.length; index += 1) {
+    const from = stops[index - 1];
+    const to = stops[index];
+    if (to.travelMode !== 'car') continue;
+
+    let best: { path: google.maps.LatLngLiteral[]; score: number } | null = null;
+    for (const routePath of routePaths) {
+      if (routePath.length < 2) continue;
+
+      const fromNearest = findNearestRoutePathIndex(routePath, from);
+      const toNearest = findNearestRoutePathIndex(routePath, to);
+      if (fromNearest.index >= toNearest.index) continue;
+
+      const score = fromNearest.miles + toNearest.miles;
+      if (!best || score < best.score) {
+        best = { path: routePath.slice(fromNearest.index, toNearest.index + 1), score };
+      }
+    }
+
+    segments.push({
+      fromStopId: from.id,
+      toStopId: to.id,
+      path:
+        best && best.score <= 25
+          ? best.path
+          : [
+              { lat: from.lat, lng: from.lng },
+              { lat: to.lat, lng: to.lng },
+            ],
+      gasPrice: getLegGasPrice(from, to),
+    });
+  }
+
+  return segments;
+}
+
 function formatGasPricePerGallon(value: number) {
   return `$${value.toFixed(2)}/gal`;
 }
@@ -2869,6 +3009,7 @@ function normalizeHotelPlace(
     userRatingsTotal,
     priceLevel,
     vicinity: place.formattedAddress || '',
+    website: typeof place.websiteURI === 'string' ? place.websiteURI : '',
     searchLabel: searchPoint.label,
     distanceFromSearchMiles,
     score: scoreHotelCandidate(priceLevel, rating, userRatingsTotal, distanceFromSearchMiles),
@@ -2893,10 +3034,36 @@ function normalizeCachedHotelCandidate(candidate: HotelCandidate, searchPoint: H
     userRatingsTotal,
     priceLevel,
     vicinity: typeof candidate.vicinity === 'string' ? candidate.vicinity : '',
+    website: typeof candidate.website === 'string' ? candidate.website : '',
     searchLabel: searchPoint.label,
     distanceFromSearchMiles,
     score: scoreHotelCandidate(priceLevel, rating, userRatingsTotal, distanceFromSearchMiles),
   };
+}
+
+// Spread hotel picks along the trip: at most two per search point instead of one global ranking.
+function pickDistributedHotelCandidates(candidates: HotelCandidate[], maxCount: number) {
+  const rankedBySearchPoint = new Map<string, HotelCandidate[]>();
+
+  [...candidates]
+    .sort((first, second) => second.score - first.score)
+    .forEach((candidate) => {
+      const list = rankedBySearchPoint.get(candidate.searchLabel) || [];
+      list.push(candidate);
+      rankedBySearchPoint.set(candidate.searchLabel, list);
+    });
+
+  const picked: HotelCandidate[] = [];
+  for (let round = 0; round < 2 && picked.length < maxCount; round += 1) {
+    for (const rankedCandidates of rankedBySearchPoint.values()) {
+      if (picked.length >= maxCount) break;
+
+      const candidate = rankedCandidates[round];
+      if (candidate) picked.push(candidate);
+    }
+  }
+
+  return picked.sort((first, second) => second.score - first.score);
 }
 
 function readCachedHotelCandidates(searchPoint: HotelSearchPoint) {
@@ -2935,6 +3102,7 @@ async function searchHotelsNearPoint(
       'priceLevel',
       'formattedAddress',
       'businessStatus',
+      'websiteURI',
     ],
     includedPrimaryTypes: ['hotel'],
     locationRestriction: {
@@ -3113,6 +3281,7 @@ function App() {
   const [selectedDocumentId, setSelectedDocumentId] = useState<string | null>(null);
   const [gasPrice, setGasPrice] = useState(() => readNumberStorage(gasPriceKey, defaultGasPrice));
   const [gasPriceScaling, setGasPriceScaling] = useState(() => readBooleanStorage(gasPriceScalingKey));
+  const [markerLabelMode, setMarkerLabelMode] = useState<MapMarkerLabelMode>(() => readMapMarkerLabelMode());
   const [lastAiEdit, setLastAiEdit] = useState<LastAiEdit | null>(() => readLastAiEdit());
   const [showLastAiEdit, setShowLastAiEdit] = useState(false);
   const [fuelMpg, setFuelMpg] = useState(() => readNumberStorage(fuelMpgKey, defaultFuelMpg, 0.01));
@@ -3209,6 +3378,14 @@ function App() {
   const dateRange = useMemo(() => formatStopDateRange(stops), [stops]);
   const tripStartDate = stops[0]?.date || '';
   const tripEndDate = stops.length > 1 ? stops[stops.length - 1]?.date || '' : '';
+  const carLegGasPriceRange = useMemo(() => {
+    if (!gasPriceScaling) return null;
+
+    const prices = getCarLegGasPrices(stops);
+    if (!prices.length) return null;
+
+    return { min: Math.min(...prices), max: Math.max(...prices) };
+  }, [gasPriceScaling, stops]);
   const saveBackendLabel =
     saveBackend === 'database' ? 'DB' : saveBackend === 'local' ? 'Local' : 'Sync';
   const previewJson = useMemo(
@@ -3324,6 +3501,10 @@ function App() {
   useEffect(() => {
     writeStorage(gasPriceScalingKey, gasPriceScaling);
   }, [gasPriceScaling]);
+
+  useEffect(() => {
+    writeStorage(mapMarkerLabelModeKey, markerLabelMode);
+  }, [markerLabelMode]);
 
   useEffect(() => {
     writeStorage(fuelMpgKey, fuelMpg);
@@ -4947,9 +5128,23 @@ function App() {
               />
               <span>
                 <strong>Gas price scaling</strong>
-                <small>Price each leg with the average gas price near its stops</small>
+                <small>Price each leg by local gas prices; route lines shade green (cheap) to red (pricey)</small>
               </span>
               <Fuel size={18} />
+            </label>
+
+            <label className="toggle-row marker-label-toggle" htmlFor="marker-date-labels">
+              <input
+                id="marker-date-labels"
+                type="checkbox"
+                checked={markerLabelMode === 'date'}
+                onChange={(event) => setMarkerLabelMode(event.currentTarget.checked ? 'date' : 'day')}
+              />
+              <span>
+                <strong>Dates on map pins</strong>
+                <small>Show stop dates on markers instead of trip day numbers</small>
+              </span>
+              <CalendarDays size={18} />
             </label>
 
             <label className="toggle-row hotel-finder-toggle" htmlFor="hotel-finder">
@@ -5159,6 +5354,8 @@ function App() {
               fitSignal={fitSignal}
               isPlacingPin={isPlacingPin}
               showHotelFinder={showHotelFinder}
+              gasPriceScaling={gasPriceScaling}
+              markerLabelMode={markerLabelMode}
               onSelectStop={setSelectedStopId}
               onPlacePin={placePin}
               onRouteDistanceChange={setDrivingMiles}
@@ -5172,12 +5369,22 @@ function App() {
               fitSignal={fitSignal}
               isPlacingPin={isPlacingPin}
               showHotelFinder={showHotelFinder}
+              gasPriceScaling={gasPriceScaling}
+              markerLabelMode={markerLabelMode}
               onSelectStop={setSelectedStopId}
               onPlacePin={placePin}
               onRouteDistanceChange={setDrivingMiles}
               onDriveEstimatesChange={setRoadDriveEstimates}
               reason="Google Maps key missing; OpenStreetMap fallback active"
             />
+          )}
+          {carLegGasPriceRange && (
+            <div className="gas-legend" aria-label="Route line gas price scale">
+              <Fuel size={14} />
+              <span>{formatGasPricePerGallon(carLegGasPriceRange.min)}</span>
+              <span className="gas-legend-bar" aria-hidden="true" />
+              <span>{formatGasPricePerGallon(carLegGasPriceRange.max)}</span>
+            </div>
           )}
         </section>
 
@@ -6140,11 +6347,12 @@ function escapeHtml(value: string) {
     .replace(/'/g, '&#39;');
 }
 
-function createOpenMapStopIcon(group: MapStopGroup, selected: boolean) {
-  const markerLabel = group.dayRangeLabel || '–';
+function createOpenMapStopIcon(group: MapStopGroup, selected: boolean, markerLabelMode: MapMarkerLabelMode) {
+  const markerLabel = getMapMarkerLabel(group, markerLabelMode);
   const className = [
     'map-stop-marker',
     getSleepClass(group.sleepingArrangement),
+    markerLabelMode === 'date' ? 'dated' : '',
     group.stops.length > 1 ? 'grouped' : '',
     group.hasRemoteWork ? 'remote' : '',
     group.hasWeekend ? 'weekend' : '',
@@ -6152,12 +6360,13 @@ function createOpenMapStopIcon(group: MapStopGroup, selected: boolean) {
   ]
     .filter(Boolean)
     .join(' ');
+  const iconWidth = markerLabelMode === 'date' ? Math.max(36, Math.round(markerLabel.length * 6.6) + 18) : 36;
 
   return L.divIcon({
     className: 'open-map-stop-icon',
     html: `<span class="${className}">${escapeHtml(markerLabel)}</span>`,
-    iconAnchor: [18, 18],
-    iconSize: [36, 36],
+    iconAnchor: [iconWidth / 2, 18],
+    iconSize: [iconWidth, 36],
     popupAnchor: [0, -18],
   });
 }
@@ -6179,6 +6388,8 @@ function createOpenMapPopupHtml(group: MapStopGroup) {
 function OpenStreetMapCanvas({
   fitSignal,
   isPlacingPin,
+  gasPriceScaling,
+  markerLabelMode,
   onDriveEstimatesChange,
   onPlacePin,
   onRouteDistanceChange,
@@ -6191,7 +6402,7 @@ function OpenStreetMapCanvas({
   const mapElementRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<L.Map | null>(null);
   const markerLayerRef = useRef<L.LayerGroup | null>(null);
-  const routeLayerRef = useRef<L.Polyline | null>(null);
+  const routeLayerRef = useRef<L.LayerGroup | null>(null);
   const isPlacingPinRef = useRef(isPlacingPin);
   const onPlacePinRef = useRef(onPlacePin);
   const onSelectStopRef = useRef(onSelectStop);
@@ -6267,19 +6478,38 @@ function OpenStreetMapCanvas({
 
     markerLayer.clearLayers();
     routeLayerRef.current?.remove();
-    routeLayerRef.current = path.length > 1
-      ? L.polyline(path, {
-          color: '#0f766e',
-          opacity: 0.95,
-          weight: 4,
-        }).addTo(map)
-      : null;
+    const routeGroup = L.layerGroup();
+    const carLegGasPrices = gasPriceScaling ? getCarLegGasPrices(stops) : [];
+
+    if (carLegGasPrices.length) {
+      const gasPriceColor = createGasPriceColor(Math.min(...carLegGasPrices), Math.max(...carLegGasPrices));
+
+      buildStraightGasLegSegments(stops).forEach((segment) => {
+        L.polyline(
+          segment.path.map((point) => [point.lat, point.lng] as [number, number]),
+          {
+            color: gasPriceColor(segment.gasPrice),
+            opacity: 0.95,
+            weight: 4,
+          },
+        ).addTo(routeGroup);
+      });
+    } else if (path.length > 1) {
+      L.polyline(path, {
+        color: defaultRouteColor,
+        opacity: 0.95,
+        weight: 4,
+      }).addTo(routeGroup);
+    }
+
+    routeGroup.addTo(map);
+    routeLayerRef.current = routeGroup;
 
     const selectedMarkers: L.Marker[] = [];
     mapStopGroups.forEach((group) => {
       const selectedInGroup = group.stops.some((stop) => stop.id === selectedStopId);
       const marker = L.marker([group.position.lat, group.position.lng], {
-        icon: createOpenMapStopIcon(group, selectedInGroup),
+        icon: createOpenMapStopIcon(group, selectedInGroup, markerLabelMode),
         title: group.stops.map((stop) => stop.label).join(', '),
       })
         .bindPopup(createOpenMapPopupHtml(group))
@@ -6292,7 +6522,7 @@ function OpenStreetMapCanvas({
     });
 
     selectedMarkers[0]?.openPopup();
-  }, [mapStopGroups, path, selectedStopId]);
+  }, [gasPriceScaling, mapStopGroups, markerLabelMode, path, selectedStopId, stops]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -6334,6 +6564,8 @@ function MapCanvas({
   fitSignal,
   isPlacingPin,
   showHotelFinder,
+  gasPriceScaling,
+  markerLabelMode,
   onSelectStop,
   onPlacePin,
   onRouteDistanceChange,
@@ -6375,6 +6607,20 @@ function MapCanvas({
     [hotelCandidates, selectedHotelId],
   );
   const directionsKey = useMemo(() => buildRouteCacheKey(stops), [stops]);
+  const carLegGasPrices = useMemo(() => (gasPriceScaling ? getCarLegGasPrices(stops) : []), [gasPriceScaling, stops]);
+  const showGasColors = gasPriceScaling && carLegGasPrices.length > 0;
+  const gasPriceColor = useMemo(
+    () => createGasPriceColor(Math.min(...carLegGasPrices), Math.max(...carLegGasPrices)),
+    [carLegGasPrices],
+  );
+  const roadGasLegSegments = useMemo(
+    () => (showGasColors && routeStatus === 'ready' ? buildRoadGasLegSegments(routePaths, stops) : []),
+    [routePaths, routeStatus, showGasColors, stops],
+  );
+  const straightGasLegSegments = useMemo(
+    () => (showGasColors && routeStatus === 'fallback' ? buildStraightGasLegSegments(stops) : []),
+    [routeStatus, showGasColors, stops],
+  );
 
   const { isLoaded, loadError } = useLoadScript({
     googleMapsApiKey: apiKey,
@@ -6559,9 +6805,10 @@ function MapCanvas({
         });
       };
       const finishSearch = (messageSuffix = '') => {
-        const rankedHotels = Array.from(candidatesById.values())
-          .sort((first, second) => second.score - first.score)
-          .slice(0, maxHotelCandidates);
+        const rankedHotels = pickDistributedHotelCandidates(
+          Array.from(candidatesById.values()),
+          maxHotelCandidates,
+        );
         const everySearchFailed = failedSearches === hotelSearchPoints.length;
 
         setHotelCandidates(rankedHotels);
@@ -6570,7 +6817,7 @@ function MapCanvas({
           everySearchFailed
             ? 'Hotel search is unavailable for this route.'
             : rankedHotels.length
-            ? `${rankedHotels.length} hotel options found near the route${messageSuffix}.`
+            ? `${rankedHotels.length} hotel options spread along the route${messageSuffix}.`
             : 'No hotel options found near this route.',
         );
       };
@@ -6639,6 +6886,8 @@ function MapCanvas({
         fitSignal={fitSignal}
         isPlacingPin={isPlacingPin}
         showHotelFinder={showHotelFinder}
+        gasPriceScaling={gasPriceScaling}
+        markerLabelMode={markerLabelMode}
         onSelectStop={onSelectStop}
         onPlacePin={onPlacePin}
         onRouteDistanceChange={onRouteDistanceChange}
@@ -6691,35 +6940,65 @@ function MapCanvas({
       }}
     >
       {routeStatus === 'ready' &&
+        !showGasColors &&
         routePaths.map((routePath, index) => (
           <PolylineF
             key={`route-${index}`}
             path={routePath}
             options={{
-              strokeColor: '#0f766e',
+              strokeColor: defaultRouteColor,
               strokeOpacity: 0.95,
               strokeWeight: 5,
             }}
           />
         ))}
 
-      {routeStatus === 'fallback' && path.length > 1 && (
+      {routeStatus === 'ready' &&
+        showGasColors &&
+        roadGasLegSegments.map((segment) => (
+          <PolylineF
+            key={`gas-route-${segment.fromStopId}-${segment.toStopId}`}
+            path={segment.path}
+            options={{
+              strokeColor: gasPriceColor(segment.gasPrice),
+              strokeOpacity: 0.95,
+              strokeWeight: 5,
+            }}
+          />
+        ))}
+
+      {routeStatus === 'fallback' && path.length > 1 && !showGasColors && (
         <PolylineF
           path={path}
           options={{
-            strokeColor: '#0f766e',
+            strokeColor: defaultRouteColor,
             strokeOpacity: 0.95,
             strokeWeight: 4,
           }}
         />
       )}
 
+      {routeStatus === 'fallback' &&
+        showGasColors &&
+        straightGasLegSegments.map((segment) => (
+          <PolylineF
+            key={`gas-fallback-${segment.fromStopId}-${segment.toStopId}`}
+            path={segment.path}
+            options={{
+              strokeColor: gasPriceColor(segment.gasPrice),
+              strokeOpacity: 0.95,
+              strokeWeight: 4,
+            }}
+          />
+        ))}
+
       {mapStopGroups.map((group) => {
         const selectedInGroup = group.stops.some((stop) => stop.id === selectedStopId);
-        const markerLabel = group.dayRangeLabel || '–';
+        const markerLabel = getMapMarkerLabel(group, markerLabelMode);
         const className = [
           'map-stop-marker',
           getSleepClass(group.sleepingArrangement),
+          markerLabelMode === 'date' ? 'dated' : '',
           group.stops.length > 1 ? 'grouped' : '',
           group.hasRemoteWork ? 'remote' : '',
           group.hasWeekend ? 'weekend' : '',
@@ -6808,15 +7087,22 @@ function MapCanvas({
               <span>{selectedHotel.userRatingsTotal ? `${selectedHotel.userRatingsTotal} reviews` : 'Reviews n/a'}</span>
               <span>{selectedHotel.distanceFromSearchMiles.toFixed(1)} mi off route sample</span>
             </div>
-            <a
-              href={`https://www.google.com/maps/search/?api=1&query=${selectedHotel.position.lat},${selectedHotel.position.lng}&query_place_id=${encodeURIComponent(
-                selectedHotel.id,
-              )}`}
-              target="_blank"
-              rel="noreferrer"
-            >
-              Open in Google Maps
-            </a>
+            <div className="hotel-info-links">
+              {selectedHotel.website && (
+                <a href={selectedHotel.website} target="_blank" rel="noreferrer">
+                  Hotel website
+                </a>
+              )}
+              <a
+                href={`https://www.google.com/maps/search/?api=1&query=${selectedHotel.position.lat},${selectedHotel.position.lng}&query_place_id=${encodeURIComponent(
+                  selectedHotel.id,
+                )}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Open in Google Maps
+              </a>
+            </div>
           </div>
         </InfoWindowF>
       )}

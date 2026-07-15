@@ -1598,6 +1598,12 @@ textarea:focus {
   box-shadow: 0 8px 18px rgba(23, 32, 42, 0.24);
   color: #ffffff;
   cursor: pointer;
+}
+
+.map-stop-marker.dated {
+  padding: 0 0.5rem;
+  font-size: 0.68rem;
+  white-space: nowrap;
   font-size: 0.72rem;
   font-weight: 800;
   letter-spacing: 0;
@@ -1714,6 +1720,35 @@ textarea:focus {
   box-shadow:
     0 0 0 3px rgba(31, 78, 121, 0.22),
     0 10px 22px rgba(23, 32, 42, 0.28);
+}
+
+.gas-legend {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid rgba(15, 118, 110, 0.18);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 12px 28px rgba(23, 32, 42, 0.14);
+  color: #344054;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+
+.gas-legend svg {
+  color: #115e59;
+}
+
+.gas-legend-bar {
+  width: 84px;
+  height: 8px;
+  border-radius: 999px;
+  background: linear-gradient(90deg, hsl(120, 82%, 40%), hsl(60, 82%, 42%), hsl(0, 82%, 44%));
 }
 
 .route-status {
@@ -2038,6 +2073,12 @@ textarea:focus {
 
 .hotel-info-window a:hover {
   text-decoration: underline;
+}
+
+.hotel-info-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.85rem;
 }
 
 .hotel-meta {
