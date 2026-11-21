@@ -570,8 +570,8 @@ function getDateOnlyTime(date: string) {
 }
 
 function addDays(date: string, days: number) {
-  const parsed = new Date(`${date}T00:00:00`);
-  parsed.setDate(parsed.getDate() + days);
+  const parsed = new Date(`${date}T00:00:00Z`);
+  parsed.setUTCDate(parsed.getUTCDate() + days);
 
   return parsed.toISOString().slice(0, 10);
 }
