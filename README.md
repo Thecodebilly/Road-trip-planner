@@ -54,4 +54,23 @@ npm start
 
 The server creates `workspaces` and `saved_trips` tables automatically when `DATABASE_URL` is configured. If the database is not configured or unavailable, workspaces and saved trips fall back to browser storage.
 
+## Access keys
+
+Each browser makes a random access key and sends it as `x-access-key`. The server stores rows as `<sha256(key)>:<id>` and only lists, saves or deletes rows for that key. **Workspaces → Copy sync link** opens the same workspaces on another device. Anyone with the link can see and edit them.
+
+Rows saved before access keys existed have no prefix, so no key can see them. To give them to one key, run this once against the database (replace `PASTE_KEY` with the part of a sync link after `#key=`):
+
+```sql
+WITH k AS (SELECT encode(sha256(convert_to('PASTE_KEY', 'UTF8')), 'hex') || ':' AS p)
+UPDATE workspaces w SET id = k.p || w.id FROM k
+WHERE w.id !~ '^[0-9a-f]{64}:' AND NOT EXISTS (SELECT 1 FROM workspaces x WHERE x.id = k.p || w.id);
+WITH k AS (SELECT encode(sha256(convert_to('PASTE_KEY', 'UTF8')), 'hex') || ':' AS p)
+UPDATE saved_trips t SET id = k.p || t.id FROM k
+WHERE t.id !~ '^[0-9a-f]{64}:' AND NOT EXISTS (SELECT 1 FROM saved_trips x WHERE x.id = k.p || t.id);
+```
+
+Add `AND w.id IN (...)` / `AND t.trip->>'workspaceId' IN (...)` to hand only some workspaces to a key.
+
+`npm test` runs `scripts/check-access.mjs`, which needs `DATABASE_URL` pointing at a throwaway database.
+
 > Do not commit real API keys. Keep them in local `.env` files and Railway environment variables.
