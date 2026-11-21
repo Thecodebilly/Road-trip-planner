@@ -309,6 +309,8 @@ const lastAiEditKey = 'road-trip-planner.lastAiEdit.v1';
 const fuelMpgKey = 'road-trip-planner.fuelMpg.v1';
 const maxCarLegHoursKey = 'road-trip-planner.maxCarLegHours.v1';
 const aiModelSettingsKey = 'road-trip-planner.aiModelSettings.v1';
+const accessKeyStorageKey = 'road-trip-planner.accessKey.v1';
+const accessKeyParam = 'key';
 const routeCacheKey = 'road-trip-planner.routeCache.v1';
 const hotelCacheKey = 'road-trip-planner.hotelCache.v1';
 const defaultWorkspaceId = 'workspace-default';
@@ -1171,9 +1173,56 @@ function filterTripsForWorkspace(trips: Trip[], workspaceId: string) {
   return sortTripsByUpdatedAt(trips.filter((trip) => trip.workspaceId === workspaceId));
 }
 
+let accessKey = '';
+
+function isAccessKey(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{32,128}$/.test(value);
+}
+
+// The server only returns workspaces and trips saved with this browser's key; a #key= sync link carries it to another device.
+function getAccessKey() {
+  if (accessKey) return accessKey;
+
+  let storedKey: unknown = '';
+  try {
+    storedKey = JSON.parse(window.localStorage.getItem(accessKeyStorageKey) || '""');
+  } catch {
+    // localStorage can be unavailable in private browsing or locked-down embeds.
+  }
+
+  const url = new URL(window.location.href);
+  const hashParams = new URLSearchParams(url.hash.replace(/^#/, ''));
+  const linkKey = hashParams.get(accessKeyParam);
+  if (linkKey !== null) {
+    hashParams.delete(accessKeyParam);
+    const nextHash = hashParams.toString();
+    window.history.replaceState(null, '', `${url.pathname}${url.search}${nextHash ? `#${nextHash}` : ''}`);
+  }
+
+  const useLinkKey =
+    isAccessKey(linkKey) &&
+    (!isAccessKey(storedKey) ||
+      linkKey === storedKey ||
+      window.confirm(
+        'Open the workspaces from this sync link in this browser? Trips this browser saved before will stay on the server but will not show here.',
+      ));
+
+  accessKey = useLinkKey
+    ? (linkKey as string)
+    : isAccessKey(storedKey)
+      ? storedKey
+      : Array.from(crypto.getRandomValues(new Uint8Array(24)), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  writeStorage(accessKeyStorageKey, accessKey);
+  return accessKey;
+}
+
+function createSyncLink() {
+  return `${window.location.origin}/#${accessKeyParam}=${getAccessKey()}`;
+}
+
 async function fetchWorkspacesFromDatabase() {
   const response = await fetch('/api/workspaces', {
-    headers: { accept: 'application/json' },
+    headers: { accept: 'application/json', 'x-access-key': getAccessKey() },
   });
 
   if (!response.ok) {
@@ -1203,6 +1252,7 @@ async function saveWorkspaceToDatabase(workspace: Workspace) {
     headers: {
       accept: 'application/json',
       'content-type': 'application/json',
+      'x-access-key': getAccessKey(),
     },
     body: JSON.stringify(normalizedWorkspace),
   });
@@ -1222,6 +1272,7 @@ async function saveWorkspaceToDatabase(workspace: Workspace) {
 async function deleteWorkspaceFromDatabase(workspaceId: string) {
   const response = await fetch(`/api/workspaces/${encodeURIComponent(workspaceId)}`, {
     method: 'DELETE',
+    headers: { 'x-access-key': getAccessKey() },
   });
 
   if (!response.ok) {
@@ -1231,7 +1282,7 @@ async function deleteWorkspaceFromDatabase(workspaceId: string) {
 
 async function fetchSavedTripsFromDatabase() {
   const response = await fetch('/api/trips', {
-    headers: { accept: 'application/json' },
+    headers: { accept: 'application/json', 'x-access-key': getAccessKey() },
   });
 
   if (!response.ok) {
@@ -1256,6 +1307,7 @@ async function saveTripToDatabase(trip: Trip) {
     headers: {
       accept: 'application/json',
       'content-type': 'application/json',
+      'x-access-key': getAccessKey(),
     },
     body: JSON.stringify(trip),
   });
@@ -1275,6 +1327,7 @@ async function saveTripToDatabase(trip: Trip) {
 async function deleteTripFromDatabase(tripId: string) {
   const response = await fetch(`/api/trips/${encodeURIComponent(tripId)}`, {
     method: 'DELETE',
+    headers: { 'x-access-key': getAccessKey() },
   });
 
   if (!response.ok) {
@@ -3423,14 +3476,6 @@ function App() {
   }, [activeWorkspaceId]);
 
   useEffect(() => {
-    if (saveBackend !== 'database') return;
-
-    void Promise.all(workspaces.map((workspace) => saveWorkspaceToDatabase(workspace))).catch(() => {
-      // Trip saving can still continue locally if workspace metadata cannot be persisted.
-    });
-  }, [saveBackend, workspaces]);
-
-  useEffect(() => {
     let canceled = false;
     const localTrips = readSavedTrips(activeWorkspaceId);
 
@@ -3444,9 +3489,12 @@ function App() {
           activeWorkspaceId,
         );
 
-        if (localTrips.length) {
-          await Promise.all(mergedTrips.map((trip) => saveTripToDatabase(trip)));
-        }
+        const databaseUpdatedAt = new Map(workspaceDatabaseTrips.map((trip) => [trip.id, trip.updatedAt]));
+        await Promise.all(
+          mergedTrips
+            .filter((trip) => databaseUpdatedAt.get(trip.id) !== trip.updatedAt)
+            .map((trip) => saveTripToDatabase(trip)),
+        );
 
         if (canceled) return;
 
@@ -4561,15 +4609,9 @@ function App() {
     const nextSavedTrips = savedTrips.filter((trip) => trip.id !== tripId);
     const removedTrip = savedTrips.find((trip) => trip.id === tripId);
     setSavedTrips(nextSavedTrips);
-    setWorkspaces((currentWorkspaces) =>
-      currentWorkspaces.some((workspace) => workspace.defaultTripId === tripId)
-        ? currentWorkspaces.map((workspace) =>
-            workspace.defaultTripId === tripId
-              ? { ...workspace, defaultTripId: '', updatedAt: new Date().toISOString() }
-              : workspace,
-          )
-        : currentWorkspaces,
-    );
+    workspaces
+      .filter((workspace) => workspace.defaultTripId === tripId)
+      .forEach((workspace) => updateWorkspace({ ...workspace, defaultTripId: '' }));
     if (
       removedTrip
         ? savedRouteTokenMatchesTrip(getSavedRouteIdFromUrl(), removedTrip)
@@ -4625,18 +4667,22 @@ function App() {
     setFitSignal((value) => value + 1);
   };
 
+  const updateWorkspace = (changedWorkspace: Workspace) => {
+    const nextWorkspace = { ...changedWorkspace, updatedAt: new Date().toISOString() };
+
+    setWorkspaces((currentWorkspaces) =>
+      currentWorkspaces.map((workspace) => (workspace.id === nextWorkspace.id ? nextWorkspace : workspace)),
+    );
+    void saveWorkspaceToDatabase(nextWorkspace).catch(() => {
+      // Browser storage still keeps the change when the database is unavailable.
+    });
+  };
+
   const setWorkspaceDefaultTrip = (tripId: string) => {
-    const now = new Date().toISOString();
     const isCurrentDefault = activeWorkspace.defaultTripId === tripId;
     const tripName = savedTrips.find((trip) => trip.id === tripId)?.name || 'route';
 
-    setWorkspaces((currentWorkspaces) =>
-      currentWorkspaces.map((workspace) =>
-        workspace.id === activeWorkspace.id
-          ? { ...workspace, defaultTripId: isCurrentDefault ? '' : tripId, updatedAt: now }
-          : workspace,
-      ),
-    );
+    updateWorkspace({ ...activeWorkspace, defaultTripId: isCurrentDefault ? '' : tripId });
     setSaveMessage(
       isCurrentDefault
         ? `Removed default route for ${activeWorkspace.name}`
@@ -5811,6 +5857,18 @@ function App() {
               </p>
             </span>
             <div className="saved-page-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={() =>
+                  copyText(createSyncLink())
+                    .then(() => setSaveMessage('Sync link copied'))
+                    .catch(() => setSaveMessage('Sync link copy failed'))
+                }
+              >
+                <Copy size={17} />
+                <span>Copy sync link</span>
+              </button>
               <button type="button" className="primary-button" onClick={openEditor}>
                 <Route size={17} />
                 <span>Open editor</span>
@@ -5820,6 +5878,10 @@ function App() {
 
           <section className="saved-page-grid">
             <div className="saved-library">
+              <p className="empty-copy">
+                Workspaces and saved trips are private to this browser. Open the sync link on another device to use
+                them there. Anyone with the link can see and edit them.
+              </p>
               <div className="section-heading">
                 <h2>All Workspaces</h2>
                 <span>{workspaces.length}</span>

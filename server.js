@@ -1,5 +1,6 @@
 import 'dotenv/config';
 
+import { createHash } from 'node:crypto';
 import { createReadStream, existsSync } from 'node:fs';
 import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import http from 'node:http';
@@ -258,6 +259,14 @@ async function requireDatabase(response) {
   }
 
   return true;
+}
+
+// Rows are keyed `<sha256(access key)>:<client id>`, so each browser key only reaches its own rows
+// and two keys can both use ids like workspace-default. Legacy rows without a prefix match no key.
+function getOwnerPrefix(accessKey) {
+  return typeof accessKey === 'string' && /^[A-Za-z0-9_-]{32,128}$/.test(accessKey)
+    ? `${createHash('sha256').update(accessKey).digest('hex')}:`
+    : '';
 }
 
 function isTrip(value) {
@@ -1829,10 +1838,19 @@ async function handleApi(request, response, url) {
     return;
   }
 
+  const owner = getOwnerPrefix(request.headers['x-access-key']);
+  if (/^\/api\/(workspaces|trips)(\/[^/]+)?$/.test(url.pathname) && !owner) {
+    sendJson(response, 401, { error: 'ACCESS_KEY_REQUIRED' });
+    return;
+  }
+
   if (request.method === 'GET' && url.pathname === '/api/workspaces') {
     if (!(await requireDatabase(response))) return;
 
-    const result = await pool.query('SELECT workspace FROM workspaces ORDER BY updated_at DESC');
+    const result = await pool.query(
+      'SELECT workspace FROM workspaces WHERE id LIKE $1 ORDER BY updated_at DESC',
+      [`${owner}%`],
+    );
     sendJson(
       response,
       200,
@@ -1852,7 +1870,7 @@ async function handleApi(request, response, url) {
 
     if (!(await requireDatabase(response))) return;
 
-    const workspaceId = decodeURIComponent(workspaceMatch[1]);
+    const workspaceId = safeDecodeValue(workspaceMatch[1]);
 
     if (request.method === 'DELETE') {
       if (workspaceId === defaultWorkspaceId) {
@@ -1860,8 +1878,11 @@ async function handleApi(request, response, url) {
         return;
       }
 
-      await pool.query("DELETE FROM saved_trips WHERE trip->>'workspaceId' = $1", [workspaceId]);
-      await pool.query('DELETE FROM workspaces WHERE id = $1', [workspaceId]);
+      await pool.query("DELETE FROM saved_trips WHERE id LIKE $2 AND trip->>'workspaceId' = $1", [
+        workspaceId,
+        `${owner}%`,
+      ]);
+      await pool.query('DELETE FROM workspaces WHERE id = $1', [`${owner}${workspaceId}`]);
       sendEmpty(response, 204);
       return;
     }
@@ -1885,7 +1906,7 @@ async function handleApi(request, response, url) {
             updated_at = EXCLUDED.updated_at
         RETURNING workspace
       `,
-      [workspace.id, JSON.stringify(workspace), updatedAt],
+      [`${owner}${workspace.id}`, JSON.stringify(workspace), updatedAt],
     );
 
     sendJson(response, 200, result.rows[0].workspace);
@@ -1895,7 +1916,9 @@ async function handleApi(request, response, url) {
   if (request.method === 'GET' && url.pathname === '/api/trips') {
     if (!(await requireDatabase(response))) return;
 
-    const result = await pool.query('SELECT trip FROM saved_trips ORDER BY updated_at DESC');
+    const result = await pool.query('SELECT trip FROM saved_trips WHERE id LIKE $1 ORDER BY updated_at DESC', [
+      `${owner}%`,
+    ]);
     sendJson(
       response,
       200,
@@ -1910,7 +1933,7 @@ async function handleApi(request, response, url) {
     return;
   }
 
-  const tripId = decodeURIComponent(tripMatch[1]);
+  const tripId = safeDecodeValue(tripMatch[1]);
 
   if (request.method === 'PUT') {
     if (!(await requireDatabase(response))) return;
@@ -1934,7 +1957,7 @@ async function handleApi(request, response, url) {
             updated_at = EXCLUDED.updated_at
         RETURNING trip
       `,
-      [trip.id, JSON.stringify(trip), updatedAt],
+      [`${owner}${trip.id}`, JSON.stringify(trip), updatedAt],
     );
 
     sendJson(response, 200, result.rows[0].trip);
@@ -1944,7 +1967,7 @@ async function handleApi(request, response, url) {
   if (request.method === 'DELETE') {
     if (!(await requireDatabase(response))) return;
 
-    await pool.query('DELETE FROM saved_trips WHERE id = $1', [tripId]);
+    await pool.query('DELETE FROM saved_trips WHERE id = $1', [`${owner}${tripId}`]);
     sendEmpty(response, 204);
     return;
   }

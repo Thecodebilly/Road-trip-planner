@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "start": "node server.js",
-    "test": "echo \"No tests configured\""
+    "test": "node scripts/check-access.mjs"
   },
   "dependencies": {
     "@react-google-maps/api": "^2.20.7",
