@@ -882,10 +882,6 @@ textarea:focus {
     0 6px 14px rgba(159, 45, 85, 0.24);
 }
 
-.saved-section {
-  border-bottom: 0;
-}
-
 .saved-list {
   display: grid;
   gap: 0.5rem;
@@ -1262,10 +1258,6 @@ textarea:focus {
   display: inline-flex;
   align-items: center;
   gap: 0.2rem;
-}
-
-.format-section {
-  border-bottom: 0;
 }
 
 .format-copy {
@@ -2093,17 +2085,6 @@ textarea:focus {
   background: #eef5fa;
   color: #1f4e79;
   font-size: 0.7rem;
-  font-weight: 800;
-}
-
-.remote-badge {
-  display: inline-block;
-  margin-top: 0.5rem;
-  padding: 0.2rem 0.45rem;
-  border-radius: 999px;
-  background: #fdecef;
-  color: #9f2d55;
-  font-size: 0.72rem;
   font-weight: 800;
 }
 

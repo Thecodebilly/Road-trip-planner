@@ -1485,49 +1485,6 @@ function createSharedTripExport(trip: Trip): ExportedTrip {
   };
 }
 
-function createCompactSharedTrip(trip: Trip): CompactSharedTrip {
-  const normalizedTrip = normalizeTrip(
-    {
-      ...trip,
-      documents: [],
-    },
-    trip.workspaceId,
-  ) || {
-    ...trip,
-    documents: [],
-  };
-
-  return {
-    f: compactTripShareFormat,
-    n: normalizedTrip.name,
-    o: normalizedTrip.notes || undefined,
-    r: normalizedTrip.remoteWorkDates.length ? normalizedTrip.remoteWorkDates : undefined,
-    s: normalizedTrip.stops.map((stop) => {
-      const fields: CompactSharedTripStop = [
-        stop.date,
-        stop.label,
-        roundPosition({ lat: stop.lat, lng: stop.lng }, 5).lat,
-        roundPosition({ lat: stop.lat, lng: stop.lng }, 5).lng,
-      ];
-      const optionals: CompactSharedTripStop[number][] = [
-        stop.notes || '',
-        stop.remoteWork ? 1 : 0,
-        stop.sleepingArrangement === 'camping' ? '' : stop.sleepingArrangement,
-        stop.friendName || '',
-        stop.travelMode === 'car' ? '' : stop.travelMode,
-      ];
-
-      while (optionals.length) {
-        const lastValue = optionals[optionals.length - 1];
-        if (lastValue !== '' && lastValue !== 0) break;
-        optionals.pop();
-      }
-
-      return [...fields, ...optionals] as CompactSharedTripStop;
-    }),
-  };
-}
-
 function parseCompactSharedTrip(candidate: unknown, workspaceId = defaultWorkspaceId) {
   if (!candidate || typeof candidate !== 'object') return null;
 
@@ -1564,17 +1521,6 @@ function parseCompactSharedTrip(candidate: unknown, workspaceId = defaultWorkspa
     },
     workspaceId,
   );
-}
-
-function encodeBase64Url(value: string) {
-  const bytes = new TextEncoder().encode(value);
-  let binary = '';
-
-  bytes.forEach((byte) => {
-    binary += String.fromCharCode(byte);
-  });
-
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
 }
 
 function decodeBase64Url(value: string) {
@@ -1616,20 +1562,6 @@ function parseTripImport(candidate: unknown, workspaceId = defaultWorkspaceId) {
     },
     workspaceId,
   );
-}
-
-function createEncodedTripShareUrl(trip: Trip) {
-  const url = new URL(window.location.href);
-  const hashParams = new URLSearchParams();
-
-  url.searchParams.delete(savedRouteParam);
-  url.searchParams.delete(shortTripShareParam);
-  url.searchParams.delete(compactTripShareParam);
-  url.searchParams.delete(legacyTripShareParam);
-  hashParams.set(compactTripShareParam, encodeBase64Url(JSON.stringify(createCompactSharedTrip(trip))));
-  url.hash = hashParams.toString();
-
-  return url.toString();
 }
 
 function createSavedRouteToken(name: string) {
