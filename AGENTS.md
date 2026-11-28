@@ -18,7 +18,7 @@ Road Trip Planner: a single-page web app for planning a multi-stop road trip on 
 
 - `server.js` (about 2,100 lines) - HTTP server: static files from `dist/`, all `/api/*` routes, DB table setup, OpenAI calls, AI rate limit. AI replies are re-checked in code after the model returns (`enforceRouteAssistantLocks`, `optimizeEditedDrivingStops`, `enforceTripStarterRules`): anchors, the date range, remote-work dates, friend stays, travel modes and driving order are enforced there, so changing the prompt alone does not change those rules.
 - `src/App.tsx` (about 7,200 lines) - the whole frontend (types, storage, share links, routing math, `App`, `MapCanvas` for Google, `OpenStreetMapCanvas` for Leaflet). Search both big files by function name instead of reading them whole.
-- `src/App.css` - all styles. `src/main.tsx` - React entry. `index.html` - Vite entry.
+- `src/App.css` - all app styles (Leaflet's own CSS is imported in `src/main.tsx`). `src/main.tsx` - React entry. `index.html` - Vite entry.
 - `src/tripStops.json` - stops of the built-in sample trip.
 - `scripts/check-access.mjs` - the only test: checks rows are private per access key.
 - `vite.config.ts` - Vite build and dev-server config. Its `preview` block (allowed hosts, `RAILWAY_PUBLIC_DOMAIN`) is read only by `vite preview`, which neither `package.json` nor `railway.json` runs; production runs `node server.js`.
