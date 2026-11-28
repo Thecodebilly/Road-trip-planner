@@ -882,10 +882,6 @@ textarea:focus {
     0 6px 14px rgba(159, 45, 85, 0.24);
 }
 
-.saved-section {
-  border-bottom: 0;
-}
-
 .saved-list {
   display: grid;
   gap: 0.5rem;
@@ -1264,10 +1260,6 @@ textarea:focus {
   gap: 0.2rem;
 }
 
-.format-section {
-  border-bottom: 0;
-}
-
 .format-copy {
   margin: 0;
   color: #667085;
@@ -1571,16 +1563,6 @@ textarea:focus {
 .map-state h2 {
   margin: 0;
   font-size: 1.05rem;
-}
-
-.map-state p {
-  max-width: 34rem;
-  margin: 0;
-  color: #52605d;
-}
-
-.map-state.error {
-  color: #9f2d55;
 }
 
 .map-stop-marker {
@@ -2093,17 +2075,6 @@ textarea:focus {
   background: #eef5fa;
   color: #1f4e79;
   font-size: 0.7rem;
-  font-weight: 800;
-}
-
-.remote-badge {
-  display: inline-block;
-  margin-top: 0.5rem;
-  padding: 0.2rem 0.45rem;
-  border-radius: 999px;
-  background: #fdecef;
-  color: #9f2d55;
-  font-size: 0.72rem;
   font-weight: 800;
 }
 
