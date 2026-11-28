@@ -1565,16 +1565,6 @@ textarea:focus {
   font-size: 1.05rem;
 }
 
-.map-state p {
-  max-width: 34rem;
-  margin: 0;
-  color: #52605d;
-}
-
-.map-state.error {
-  color: #9f2d55;
-}
-
 .map-stop-marker {
   --marker-color: #0f766e;
   min-width: 28px;
